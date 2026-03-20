@@ -1,6 +1,6 @@
 --[[
-    Aimbot v3.1
-    Fixed prediction for mobile
+    Aimbot v3.2
+    Fixed mobile accuracy + aim part + ping fix
     Full compatibility
 ]]
 
@@ -14,8 +14,8 @@ local function try(fn, ...)
 end
 
 local env = try(function() return getgenv() end) or _G
-if env._AimbotV31 then return end
-env._AimbotV31 = true
+if env._AimbotV32 then return end
+env._AimbotV32 = true
 
 ----------------------------------------------------------------
 -- SAFE UTILS
@@ -65,39 +65,44 @@ local ABS=math.abs; local SQRT=math.sqrt; local PI=math.pi
 local HUGE=math.huge; local MAX=math.max; local MIN=math.min
 
 ----------------------------------------------------------------
--- PING DETECTION
+-- PING DETECTION (FIXED: proper round-trip)
 ----------------------------------------------------------------
-local cachedPing = 0.05
+local cachedPing = 0.1
+local pingMethod = "default"
 
 local function getPing()
-    -- Method 1: Stats
-    local p = try(function()
-        return Stats.Network.ServerStatsItem["Data Ping"]:GetValue() / 1000
+    local p1 = try(function()
+        return Stats.Network.ServerStatsItem["Data Ping"]:GetValue()
     end)
-    if p and p > 0 then cachedPing = p; return p end
+    if p1 and p1 > 1 then
+        cachedPing = p1 / 1000
+        pingMethod = "stats"
+        return
+    end
 
-    -- Method 2: NetworkClient
     local p2 = try(function()
         local nc = game:GetService("NetworkClient")
-        return nc:GetChildren()[1]:GetPing() / 1000
+        return nc:GetChildren()[1]:GetPing()
     end)
-    if p2 and p2 > 0 then cachedPing = p2; return p2 end
+    if p2 and p2 > 1 then
+        cachedPing = p2 / 1000
+        pingMethod = "netclient"
+        return
+    end
 
-    -- Method 3: Player:GetNetworkPing
-    local p3 = try(function()
-        return LP:GetNetworkPing()
-    end)
-    if p3 and p3 > 0 then cachedPing = p3; return p3 end
+    local p3 = try(function() return LP:GetNetworkPing() end)
+    if p3 and p3 > 0.001 then
+        cachedPing = p3 * 2
+        pingMethod = "netping"
+        return
+    end
 
-    return cachedPing
+    cachedPing = 0.1
+    pingMethod = "default"
 end
 
--- Update ping periodically
 safeSpawn(function()
-    while true do
-        getPing()
-        safeWait(2)
-    end
+    while true do getPing(); safeWait(1.5) end
 end)
 
 ----------------------------------------------------------------
@@ -109,23 +114,19 @@ local Config = {
     active       = false,
     fov          = 90,
     showFov      = true,
-    -- Prediction reworked
     prediction   = false,
-    predValue    = 0.165,
-    smartPredict = false,
+    predValue    = 0.05,
+    smartPredict = true,
     autoPing     = true,
-    -- Aim
+    aimPart      = 2,
     humanLike    = false,
     aimSpeed     = 0.35,
     keybind      = Enum.KeyCode.C,
     waitingBind  = false,
-    -- Social
     friends      = {},
-    -- Visual
     showCross    = true,
     crossSize    = 14,
     crossGap     = 4,
-    -- Priority
     priority     = 1,
     stickyTarget = nil,
     stickyBreak  = 25,
@@ -139,8 +140,15 @@ local PRIORITIES = {
     {id=5,en="Sticky",     ru="Залипание"},
 }
 
+local AIM_PARTS = {
+    {id=1, en="Head (hard)", ru="Голова (сложно)"},
+    {id=2, en="Body (easy)", ru="Тело (легко)"},
+    {id=3, en="Legs / HRP",  ru="Ноги / HRP"},
+}
+
 local GC = {conn={},tweens={}}
 local currentTarget = nil
+local lastFrameDt = 0.016
 
 ----------------------------------------------------------------
 -- LOCALIZATION
@@ -150,9 +158,10 @@ local L = {
         choose="Choose Version",pc="PC",mobile="Mobile",
         title="Aimbot",active="Active",fov="FOV",
         showFov="Show FOV Circle",
-        prediction="Basic Prediction",predValue="Manual Lead",
+        prediction="Basic Prediction",predValue="Extra Lead",
         smartPred="Smart Predict",autoPing="Auto Ping Comp.",
-        pingInfo="Ping: %dms",
+        pingInfo="Ping: %dms (%s)",
+        aimPart="Aim Part",
         humanLike="Human-like",aimSpeed="Aim Speed",
         keybind="Keybind",langSwitch="RU",pressKey="...",
         aimOn="AIM: ON",aimOff="AIM: OFF",
@@ -170,9 +179,10 @@ local L = {
         choose="Выберите версию",pc="ПК",mobile="Телефон",
         title="Аимбот",active="Активен",fov="Обзор (FOV)",
         showFov="Показать круг FOV",
-        prediction="Простой предикт",predValue="Ручная поправка",
+        prediction="Простой предикт",predValue="Доп. поправка",
         smartPred="Умный предикт",autoPing="Авто-комп. пинга",
-        pingInfo="Пинг: %dмс",
+        pingInfo="Пинг: %dмс (%s)",
+        aimPart="Часть тела",
         humanLike="Плавный (Human-like)",aimSpeed="Скорость наводки",
         keybind="Клавиша",langSwitch="EN",pressKey="...",
         aimOn="АИМ: ВКЛ",aimOff="АИМ: ВЫКЛ",
@@ -210,6 +220,34 @@ local function getVel(hrp)
     if Support.asmVel then try(function() v=hrp.AssemblyLinearVelocity end) end
     if v.Magnitude<0.01 then try(function() v=hrp.Velocity end) end
     return v
+end
+
+----------------------------------------------------------------
+-- AIM PART RESOLVER
+----------------------------------------------------------------
+local function getAimPartPos(char)
+    local ap = Config.aimPart
+    if ap == 1 then
+        local head = char:FindFirstChild("Head")
+        if head then return head.Position end
+    end
+    if ap == 2 then
+        local ut = char:FindFirstChild("UpperTorso")
+        if ut then return ut.Position + V3(0, 0.3, 0) end
+        local torso = char:FindFirstChild("Torso")
+        if torso then return torso.Position + V3(0, 0.3, 0) end
+        local head = char:FindFirstChild("Head")
+        if head then return head.Position end
+    end
+    if ap == 3 then
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        if hrp then return hrp.Position end
+    end
+    local hrp = char:FindFirstChild("HumanoidRootPart")
+    if hrp then return hrp.Position end
+    local head = char:FindFirstChild("Head")
+    if head then return head.Position end
+    return nil
 end
 
 ----------------------------------------------------------------
@@ -251,20 +289,17 @@ local function getThreat(name)
 end
 
 ----------------------------------------------------------------
--- SMART PREDICT ENGINE v2 (FIXED)
+-- SMART PREDICT ENGINE v3 (FIXED ACCURACY)
 ----------------------------------------------------------------
 local SPData = {}
 
 local function spInit()
     return {
-        -- Raw samples (position, time)
-        posBuf     = {},   -- max 30
-        -- Computed
+        posBuf     = {},
         rawVel     = V3(0,0,0),
         smoothVel  = V3(0,0,0),
         accel      = V3(0,0,0),
         angVel     = 0,
-        -- State
         isSprint   = false,
         isStop     = false,
         isStrafe   = false,
@@ -299,88 +334,64 @@ local function spUpdate(plr, char)
     if dt < 0.005 then return d end
     d.lastTime = now
 
-    -- Store position sample
     table.insert(d.posBuf, {p=pos, t=now})
-    while #d.posBuf > 30 do table.remove(d.posBuf, 1) end
+    while #d.posBuf > 20 do table.remove(d.posBuf, 1) end
 
-    -- === VELOCITY: dual source, pick best ===
-
-    -- Source 1: Server replicated velocity (most accurate when available)
     local serverVel = getVel(hrp)
 
-    -- Source 2: Position delta (works everywhere, 2 frames back for stability)
     local posVel = V3(0,0,0)
     if #d.posBuf >= 3 then
-        -- Use 3 frames ago for smoother estimate
-        local idx = MAX(1, #d.posBuf - 2)
+        local idx = MAX(1, #d.posBuf - 1)
         local old = d.posBuf[idx]
         local pdt = now - old.t
-        if pdt > 0.01 then
-            posVel = (pos - old.p) / pdt
-        end
+        if pdt > 0.005 then posVel = (pos - old.p) / pdt end
     elseif #d.posBuf >= 2 then
         local old = d.posBuf[#d.posBuf - 1]
         local pdt = now - old.t
         if pdt > 0.005 then posVel = (pos - old.p) / pdt end
     end
 
-    -- Pick: server vel if it agrees with position vel, else use position
     local useVel
-    if serverVel.Magnitude > 0.5 then
-        -- Check if server vel is roughly same direction as pos vel
-        if posVel.Magnitude > 0.5 then
-            local agree = serverVel.Unit:Dot(posVel.Unit)
-            if agree > 0.3 then
-                useVel = serverVel * 0.6 + posVel * 0.4
-            else
-                -- Disagreement: position is more reliable (server might be stale)
-                useVel = posVel * 0.7 + serverVel * 0.3
-            end
-        else
+    if serverVel.Magnitude > 1 and posVel.Magnitude > 0.5 then
+        local agree = serverVel.Unit:Dot(posVel.Unit)
+        if agree > 0.5 then
             useVel = serverVel
+        else
+            useVel = posVel
         end
+    elseif serverVel.Magnitude > 1 then
+        useVel = serverVel
     else
         useVel = posVel
     end
 
     d.rawVel = useVel
+    d.smoothVel = useVel * 0.92 + d.smoothVel * 0.08
 
-    -- Smooth velocity: FAST EMA (less smoothing = more responsive)
-    local alpha = CLAMP(dt * 20, 0.1, 0.9)
-    d.smoothVel = d.smoothVel + (useVel - d.smoothVel) * alpha
-
-    -- Acceleration: over short window (4 frames)
-    if #d.posBuf >= 5 then
-        local i1 = MAX(1, #d.posBuf - 4)
-        local i2 = MAX(1, #d.posBuf - 2)
-        local t1, t2 = d.posBuf[i1].t, d.posBuf[i2].t
-        local p1, p2 = d.posBuf[i1].p, d.posBuf[i2].p
+    if #d.posBuf >= 4 then
+        local i1 = MAX(1, #d.posBuf - 3)
         local v1 = V3(0,0,0)
         if i1 > 1 then
-            local dt1 = t1 - d.posBuf[i1-1].t
-            if dt1 > 0.005 then v1 = (p1 - d.posBuf[i1-1].p) / dt1 end
+            local dt1 = d.posBuf[i1].t - d.posBuf[i1-1].t
+            if dt1 > 0.005 then v1 = (d.posBuf[i1].p - d.posBuf[i1-1].p) / dt1 end
         end
-        local v2 = V3(0,0,0)
-        local dt2 = now - t2
-        if dt2 > 0.005 then v2 = (pos - p2) / dt2 end
-        local adt = now - t1
-        if adt > 0.02 then
-            d.accel = d.accel + ((v2 - v1) / adt - d.accel) * 0.4
+        local dt2 = now - d.posBuf[#d.posBuf-1].t
+        local v2 = dt2 > 0.005 and (pos - d.posBuf[#d.posBuf-1].p) / dt2 or useVel
+        local adt = now - d.posBuf[i1].t
+        if adt > 0.01 then
+            d.accel = d.accel + ((v2-v1)/adt - d.accel) * 0.5
         end
     end
 
-    -- WalkSpeed + sprint detect
     local ws = 16; try(function() ws = hum.WalkSpeed end)
-    d.baseSpeed = MAX(d.baseSpeed * 0.99, ws * 0.8)
+    d.baseSpeed = MAX(d.baseSpeed * 0.995, ws * 0.75)
 
     local flatSpeed = v3FM(useVel)
-    d.isSprint = ws / MAX(d.baseSpeed, 1) > 1.4 or flatSpeed > d.baseSpeed * 1.4
+    d.isSprint = ws / MAX(d.baseSpeed, 1) > 1.35 or flatSpeed > d.baseSpeed * 1.35
 
-    -- Stop detect
     local moveDir = V3(0,0,0); try(function() moveDir = hum.MoveDirection end)
-    d.isStop = v3FM(moveDir) < 0.1 and flatSpeed > 1
+    d.isStop = v3FM(moveDir) < 0.1 and flatSpeed > 0.5
 
-    -- Direction changes
     local flatDir = v3FU(useVel)
     if flatSpeed > 1 and d.lastFlatDir.Magnitude > 0.01 then
         local ta = angF(d.lastFlatDir, flatDir)
@@ -392,20 +403,20 @@ local function spUpdate(plr, char)
     end
     if flatSpeed > 1 then d.lastFlatDir = flatDir end
 
-    -- Angular velocity
-    if #d.posBuf >= 6 then
-        local p0 = d.posBuf[MAX(1,#d.posBuf-5)]
+    if #d.posBuf >= 5 then
+        local p0 = d.posBuf[MAX(1,#d.posBuf-4)]
         local p1 = d.posBuf[MAX(1,#d.posBuf-2)]
         local p2 = d.posBuf[#d.posBuf]
         local d0 = v3FU(p1.p-p0.p); local d1 = v3FU(p2.p-p1.p)
-        local ad = angF(d0,d1); local adt = p2.t-p0.t
-        if adt>0.01 then
-            local sign = crsY(d0,d1)>0 and 1 or -1
-            d.angVel = d.angVel + (sign*ad/adt - d.angVel) * 0.3
+        if d0.Magnitude>0.001 and d1.Magnitude>0.001 then
+            local ad = angF(d0,d1); local adt = p2.t-p0.t
+            if adt>0.01 then
+                local sign = crsY(d0,d1)>0 and 1 or -1
+                d.angVel = d.angVel + (sign*ad/adt - d.angVel) * 0.35
+            end
         end
     end
 
-    -- Confidence: LESS AGGRESSIVE
     local conf = 0.6
     if flatSpeed > 2 and not d.isStrafe then conf = conf + 0.25 end
     if d.isSprint then conf = conf + 0.1 end
@@ -413,19 +424,22 @@ local function spUpdate(plr, char)
     local rs = 0
     for _,dc in ipairs(d.dirChanges) do if now-dc.t<0.4 then rs=rs+1 end end
     if rs > 3 then conf = conf * 0.7 end
-    d.confidence = CLAMP(conf, 0.3, 0.95) -- MIN 0.3 not 0.05!
+    d.confidence = CLAMP(conf, 0.3, 0.95)
 
     return d
 end
 
 local function getSmartPredTime()
-    local base = Config.predValue
+    local total = 0
     if Config.autoPing then
-        local ping = cachedPing
-        -- Prediction time = ping + manual lead + small constant for processing
-        return ping + base + 0.02
+        total = total + cachedPing
+        total = total + lastFrameDt
+        if Config.platform == "mobile" then
+            total = total + 0.05
+        end
     end
-    return base
+    total = total + Config.predValue
+    return MAX(total, 0.01)
 end
 
 local function spPredict(plr, char)
@@ -437,75 +451,55 @@ local function spPredict(plr, char)
 
     local flatSpeed = v3FM(d.rawVel)
 
-    -- STOPPING
-    if d.isStop and flatSpeed < d.baseSpeed * 0.3 then
-        -- Target releasing keys, will decelerate
+    if d.isStop and flatSpeed < 2 then
         local stopFactor = CLAMP(flatSpeed / MAX(d.baseSpeed, 1), 0, 1)
-        return d.smoothVel * pt * stopFactor * 0.4
+        return d.rawVel * pt * stopFactor * 0.3
     end
 
-    -- BASE: use rawVel (more recent) blended with smoothVel
-    local velToUse = d.rawVel * 0.65 + d.smoothVel * 0.35
-    local base = velToUse * pt
+    local vel = d.rawVel
+    local base = vel * pt
 
-    -- ACCELERATION
     local accelOff = d.accel * 0.5 * pt * pt
+    if accelOff.Magnitude > flatSpeed * pt * 0.5 then
+        accelOff = accelOff.Unit * flatSpeed * pt * 0.5
+    end
 
-    -- SPRINT boost
     local sprintMult = 1.0
     if d.isSprint then
         sprintMult = 1.08
-        local mf = v3FU(velToUse)
+        local mf = v3FU(vel)
         if mf.Magnitude > 0.01 then
-            base = base + mf * (flatSpeed * 0.04 * pt)
+            base = base + mf * (flatSpeed * 0.03 * pt)
         end
     end
 
-    -- CURVE (angular velocity)
-    if ABS(d.angVel) > 0.12 and flatSpeed > 2 then
+    if ABS(d.angVel) > 0.15 and flatSpeed > 2 then
         local ad = d.angVel * pt
-        local cd = v3FU(velToUse)
+        local cd = v3FU(vel)
         if cd.Magnitude > 0.01 then
             local ca, sa = COS(ad), SIN(ad)
             local rd = V3(cd.X*ca - cd.Z*sa, 0, cd.X*sa + cd.Z*ca)
             local cv = rd * flatSpeed * pt
-            local cf = CLAMP(ABS(d.angVel) / 3, 0, 0.5)
+            local cf = CLAMP(ABS(d.angVel) / 3, 0, 0.4)
             local fb = V3(base.X, 0, base.Z)
             base = V3(fb.X*(1-cf)+cv.X*cf, base.Y, fb.Z*(1-cf)+cv.Z*cf)
         end
     end
 
-    -- STRAFE
-    local strafeOff = V3(0,0,0)
-    if d.isStrafe and #d.dirChanges > 0 then
-        local lc = d.dirChanges[#d.dirChanges]
-        if tick()-lc.t < 0.25 then
-            strafeOff = v3FU(d.rawVel) * flatSpeed * pt * 0.12
-        end
-    end
-
-    -- VERTICAL (gravity)
     local vertOff = V3(0,0,0)
-    local vy = d.rawVel.Y
-    if ABS(vy) > 1 then
-        vertOff = V3(0, vy*pt - 0.5*196.2*pt*pt - velToUse.Y*pt, 0)
+    if ABS(vel.Y) > 1 then
+        vertOff = V3(0, vel.Y*pt - 0.5*196.2*pt*pt - vel.Y*pt, 0)
     end
 
-    -- COMBINE
-    local total = (base + accelOff + strafeOff + vertOff) * sprintMult
+    local total = (base + accelOff + vertOff) * sprintMult * d.confidence
 
-    -- Apply confidence (but not as aggressively)
-    total = total * d.confidence
-
-    -- Safety clamp
-    local mx = flatSpeed * pt * 3
+    local mx = flatSpeed * pt * 2.5
     if mx < 0.1 then mx = 0.1 end
     if total.Magnitude > mx then total = total.Unit * mx end
 
     return total
 end
 
--- Simple prediction (basic velocity * time)
 local function simplePred(char)
     local hrp = char:FindFirstChild("HumanoidRootPart")
     if not hrp then return V3(0,0,0) end
@@ -572,11 +566,11 @@ local function getValid()
     Camera=workspace.CurrentCamera; local cf=Camera.CFrame; local tgts={}
     for _,p in ipairs(Players:GetPlayers()) do
         if p~=LP and p.Character and alive(p.Character) and not isFriend(p.Name) then
-            local head=p.Character:FindFirstChild("Head")
+            local aimPos = getAimPartPos(p.Character)
             local hrp=p.Character:FindFirstChild("HumanoidRootPart")
             local hum=p.Character:FindFirstChildOfClass("Humanoid")
-            if head and hrp and hum then
-                local dir=(head.Position-cf.Position); local dist=dir.Magnitude
+            if aimPos and hrp and hum then
+                local dir=(aimPos-cf.Position); local dist=dir.Magnitude
                 if dist>0.5 then
                     dir=dir.Unit
                     local dot=CLAMP(cf.LookVector:Dot(dir),-1,1)
@@ -626,13 +620,11 @@ local function bestTarget()
     return chosen
 end
 
--- *** FIXED: Smart predict works INDEPENDENTLY ***
 local function getAimPos(plr)
     local c=plr.Character; if not c then return nil end
-    local head=c:FindFirstChild("Head"); if not head then return nil end
-    local pos=head.Position
+    local pos = getAimPartPos(c)
+    if not pos then return nil end
 
-    -- Smart predict: works on its own, no dependency on basic prediction
     if Config.smartPredict then
         pos = pos + spPredict(plr, c)
     elseif Config.prediction then
@@ -662,13 +654,12 @@ if Support.drawing then
     end)
 end
 
--- GUI setup
 try(function()
     local p=try(function() return gethui() end) or game:GetService("CoreGui")
-    local old=p:FindFirstChild("AimbotV31"); if old then old:Destroy() end
+    local old=p:FindFirstChild("AimbotV32"); if old then old:Destroy() end
 end)
 
-local Gui=Instance.new("ScreenGui"); Gui.Name="AimbotV31"; Gui.ResetOnSpawn=false
+local Gui=Instance.new("ScreenGui"); Gui.Name="AimbotV32"; Gui.ResetOnSpawn=false
 try(function() Gui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling end)
 if Support.syn then try(function() syn.protect_gui(Gui) end) end
 if Support.protect then try(function() protect_gui(Gui) end) end
@@ -679,7 +670,6 @@ if not guiP then guiP=try(function() return game:GetService("CoreGui") end) end
 if not guiP then guiP=LP:WaitForChild("PlayerGui") end
 Gui.Parent=guiP
 
--- GUI fallback for drawing
 local function createFallback()
     if Support.drawing then return end
     fovFrame=Instance.new("Frame"); fovFrame.Name="Fov"
@@ -697,24 +687,17 @@ createFallback()
 
 local function setFovVis(vis,radius)
     if Support.drawing and FovCircle then
-        try(function()
-            local vs=Camera.ViewportSize
-            FovCircle.Position=Vector2.new(vs.X/2,vs.Y/2)
-            FovCircle.Radius=radius or 100; FovCircle.Visible=vis
-        end)
+        try(function() local vs=Camera.ViewportSize; FovCircle.Position=Vector2.new(vs.X/2,vs.Y/2)
+            FovCircle.Radius=radius or 100; FovCircle.Visible=vis end)
     elseif fovFrame then
         local vs=Camera.ViewportSize; local r=radius or 100
-        fovFrame.Size=UDim2.new(0,r*2,0,r*2)
-        fovFrame.Position=UDim2.new(0,vs.X/2,0,vs.Y/2); fovFrame.Visible=vis
+        fovFrame.Size=UDim2.new(0,r*2,0,r*2); fovFrame.Position=UDim2.new(0,vs.X/2,0,vs.Y/2); fovFrame.Visible=vis
     end
 end
 
 local function setCrossVis(v)
-    if Support.drawing then
-        for _,ln in ipairs(CrossLines) do try(function() ln.Visible=v end) end
-    else
-        for _,fr in ipairs(crossFrames) do try(function() fr.Visible=v end) end
-    end
+    if Support.drawing then for _,ln in ipairs(CrossLines) do try(function() ln.Visible=v end) end
+    else for _,fr in ipairs(crossFrames) do try(function() fr.Visible=v end) end end
 end
 
 local function updateCross(sx,sy)
@@ -723,7 +706,6 @@ local function updateCross(sx,sy)
     local b=135+FLOOR(w*48); local p=195+FLOOR(w*55)
     local c1=Color3.fromRGB(b,b,b+12); local c2=Color3.fromRGB(p,p,p+8)
     local sz,gp=Config.crossSize,Config.crossGap
-
     if Support.drawing then
         if #CrossLines<4 then return end
         try(function() CrossLines[1].From=Vector2.new(sx,sy-gp); CrossLines[1].To=Vector2.new(sx,sy-gp-sz); CrossLines[1].Color=c2 end)
@@ -743,44 +725,26 @@ end
 -- UI HELPERS
 ----------------------------------------------------------------
 local function corner(p,r) try(function() local c=Instance.new("UICorner"); c.CornerRadius=UDim.new(0,r or 8); c.Parent=p end) end
-local function shimmer(p)
-    try(function()
-        local g=Instance.new("UIGradient")
-        g.Color=ColorSequence.new({
-            ColorSequenceKeypoint.new(0,Color3.fromRGB(15,15,20)),
-            ColorSequenceKeypoint.new(0.35,Color3.fromRGB(15,15,20)),
-            ColorSequenceKeypoint.new(0.48,Color3.fromRGB(50,50,68)),
-            ColorSequenceKeypoint.new(0.50,Color3.fromRGB(125,125,150)),
-            ColorSequenceKeypoint.new(0.52,Color3.fromRGB(50,50,68)),
-            ColorSequenceKeypoint.new(0.65,Color3.fromRGB(15,15,20)),
-            ColorSequenceKeypoint.new(1,Color3.fromRGB(15,15,20)),
-        })
-        g.Rotation=25; g.Offset=Vector2.new(-1.5,0); g.Parent=p
-        local tw=TweenService:Create(g,TweenInfo.new(3.5,Enum.EasingStyle.Sine,Enum.EasingDirection.InOut,-1,true),{Offset=Vector2.new(1.5,0)})
-        tw:Play(); table.insert(GC.tweens,tw)
-    end)
-end
+local function shimmer(p) try(function()
+    local g=Instance.new("UIGradient")
+    g.Color=ColorSequence.new({ColorSequenceKeypoint.new(0,Color3.fromRGB(15,15,20)),ColorSequenceKeypoint.new(0.35,Color3.fromRGB(15,15,20)),ColorSequenceKeypoint.new(0.48,Color3.fromRGB(50,50,68)),ColorSequenceKeypoint.new(0.50,Color3.fromRGB(125,125,150)),ColorSequenceKeypoint.new(0.52,Color3.fromRGB(50,50,68)),ColorSequenceKeypoint.new(0.65,Color3.fromRGB(15,15,20)),ColorSequenceKeypoint.new(1,Color3.fromRGB(15,15,20))})
+    g.Rotation=25; g.Offset=Vector2.new(-1.5,0); g.Parent=p
+    local tw=TweenService:Create(g,TweenInfo.new(3.5,Enum.EasingStyle.Sine,Enum.EasingDirection.InOut,-1,true),{Offset=Vector2.new(1.5,0)})
+    tw:Play(); table.insert(GC.tweens,tw)
+end) end
 local function glowS(p) try(function()
     local s=Instance.new("UIStroke"); s.Thickness=1.2; s.Color=Color3.fromRGB(55,55,75); s.Parent=p
-    safeSpawn(function() local ph=0; while s and s.Parent do
-        ph=ph+0.025; local v=0.22+0.1*SIN(ph*1.3)
-        s.Color=Color3.fromRGB(FLOOR(v*255),FLOOR(v*255),FLOOR((v+0.04)*255))
-        RunService.Heartbeat:Wait()
-    end end)
+    safeSpawn(function() local ph=0; while s and s.Parent do ph=ph+0.025; local v=0.22+0.1*SIN(ph*1.3)
+        s.Color=Color3.fromRGB(FLOOR(v*255),FLOOR(v*255),FLOOR((v+0.04)*255)); RunService.Heartbeat:Wait() end end)
 end) end
 
 local function drag(frame,handle)
     handle=handle or frame; local dr,di,ds,sp
-    handle.InputBegan:Connect(function(i)
-        if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then
-            dr=true; ds=i.Position; sp=frame.Position
-            i.Changed:Connect(function() if i.UserInputState==Enum.UserInputState.End then dr=false end end)
-        end end)
-    handle.InputChanged:Connect(function(i)
-        if i.UserInputType==Enum.UserInputType.MouseMovement or i.UserInputType==Enum.UserInputType.Touch then di=i end end)
-    UserInput.InputChanged:Connect(function(i)
-        if i==di and dr then local d=i.Position-ds
-            frame.Position=UDim2.new(sp.X.Scale,sp.X.Offset+d.X,sp.Y.Scale,sp.Y.Offset+d.Y) end end)
+    handle.InputBegan:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 or i.UserInputType==Enum.UserInputType.Touch then
+        dr=true; ds=i.Position; sp=frame.Position; i.Changed:Connect(function() if i.UserInputState==Enum.UserInputState.End then dr=false end end) end end)
+    handle.InputChanged:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseMovement or i.UserInputType==Enum.UserInputType.Touch then di=i end end)
+    UserInput.InputChanged:Connect(function(i) if i==di and dr then local d=i.Position-ds
+        frame.Position=UDim2.new(sp.X.Scale,sp.X.Offset+d.X,sp.Y.Scale,sp.Y.Offset+d.Y) end end)
 end
 
 local function hBtn(btn,base,hov) try(function()
@@ -798,8 +762,7 @@ local function uiToggle(par,text,def,cb,ord)
     lb.Position=UDim2.new(0,12,0,0); lb.Font=Enum.Font.GothamSemibold; lb.TextColor3=Color3.fromRGB(220,220,230)
     lb.TextSize=13; lb.TextXAlignment=Enum.TextXAlignment.Left; lb.Text=text; lb.Parent=f
     local tr=Instance.new("Frame"); tr.Size=UDim2.new(0,40,0,20); tr.Position=UDim2.new(1,-52,0.5,-10)
-    tr.BackgroundColor3=def and Color3.fromRGB(60,148,98) or Color3.fromRGB(46,46,58)
-    tr.BorderSizePixel=0; tr.Parent=f; corner(tr,10)
+    tr.BackgroundColor3=def and Color3.fromRGB(60,148,98) or Color3.fromRGB(46,46,58); tr.BorderSizePixel=0; tr.Parent=f; corner(tr,10)
     local kn=Instance.new("Frame"); kn.Size=UDim2.new(0,16,0,16)
     kn.Position=def and UDim2.new(1,-18,0.5,-8) or UDim2.new(0,2,0.5,-8)
     kn.BackgroundColor3=Color3.fromRGB(240,240,246); kn.BorderSizePixel=0; kn.Parent=tr; corner(kn,8)
@@ -855,24 +818,16 @@ local function uiHeader(par,text,ord)
     return f,lb
 end
 
--- Ping info label
 local function uiPingInfo(par, ord)
     local f=Instance.new("Frame"); f.Size=UDim2.new(1,0,0,24); f.BackgroundColor3=Color3.fromRGB(18,18,24)
     f.BorderSizePixel=0; f.LayoutOrder=ord or 0; f.Parent=par; corner(f,5)
     local lb=Instance.new("TextLabel"); lb.BackgroundTransparency=1; lb.Size=UDim2.new(1,-16,1,0)
     lb.Position=UDim2.new(0,8,0,0); lb.Font=Enum.Font.Gotham; lb.TextColor3=Color3.fromRGB(110,180,130)
     lb.TextSize=11; lb.TextXAlignment=Enum.TextXAlignment.Left
-    lb.Text=string.format(t("pingInfo"), FLOOR(cachedPing*1000)); lb.Parent=f
-
-    -- Auto update
-    safeSpawn(function()
-        while lb and lb.Parent do
-            try(function()
-                lb.Text = string.format(t("pingInfo"), FLOOR(cachedPing*1000))
-            end)
-            safeWait(1)
-        end
-    end)
+    lb.Text=string.format(t("pingInfo"), FLOOR(cachedPing*1000), pingMethod); lb.Parent=f
+    safeSpawn(function() while lb and lb.Parent do
+        try(function() lb.Text=string.format(t("pingInfo"), FLOOR(cachedPing*1000), pingMethod) end)
+        safeWait(1) end end)
     return f
 end
 
@@ -882,41 +837,71 @@ local function uiPriority(par,mob,ord)
     if Support.autoSize then try(function() container.AutomaticSize=Enum.AutomaticSize.Y end) end
     container.Parent=par
     local lay=Instance.new("UIListLayout"); lay.SortOrder=Enum.SortOrder.LayoutOrder; lay.Padding=UDim.new(0,3); lay.Parent=container
-    if not Support.autoSize then
-        lay:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
-            container.Size=UDim2.new(1,0,0,lay.AbsoluteContentSize.Y) end)
-    end
+    if not Support.autoSize then lay:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        container.Size=UDim2.new(1,0,0,lay.AbsoluteContentSize.Y) end) end
     local selC=Color3.fromRGB(55,110,85); local unC=Color3.fromRGB(28,28,38)
     local selH=Color3.fromRGB(62,125,95); local unH=Color3.fromRGB(38,38,52)
     local descK={"priDesc1","priDesc2","priDesc3","priDesc4","priDesc5"}
     local btns={}
     for idx,pri in ipairs(PRIORITIES) do
-        local h=mob and 52 or 44
+        local h=mob and 48 or 40
         local f=Instance.new("TextButton"); f.Size=UDim2.new(1,0,0,h)
         f.BackgroundColor3=Config.priority==pri.id and selC or unC; f.BorderSizePixel=0
         f.Font=Enum.Font.GothamBold; f.TextColor3=Color3.fromRGB(235,235,248)
-        f.TextSize=mob and 14 or 13; f.TextXAlignment=Enum.TextXAlignment.Left
+        f.TextSize=mob and 13 or 12; f.TextXAlignment=Enum.TextXAlignment.Left
         f.AutoButtonColor=false; f.LayoutOrder=idx; f.Parent=container; corner(f,7)
         try(function() local tp=Instance.new("UIPadding"); tp.PaddingLeft=UDim.new(0,14); tp.Parent=f end)
         f.Text=Config.lang=="ru" and pri.ru or pri.en
         local desc=Instance.new("TextLabel"); desc.BackgroundTransparency=1
-        desc.Size=UDim2.new(1,-28,0,14); desc.Position=UDim2.new(0,14,1,-18)
+        desc.Size=UDim2.new(1,-28,0,12); desc.Position=UDim2.new(0,14,1,-15)
         desc.Font=Enum.Font.Gotham; desc.TextColor3=Color3.fromRGB(120,120,145)
-        desc.TextSize=10; desc.TextXAlignment=Enum.TextXAlignment.Left; desc.Text=t(descK[idx]); desc.Parent=f
+        desc.TextSize=9; desc.TextXAlignment=Enum.TextXAlignment.Left; desc.Text=t(descK[idx]); desc.Parent=f
         local ind=Instance.new("Frame"); ind.Size=UDim2.new(0,4,0,h-14)
         ind.Position=UDim2.new(1,-18,0.5,-(h-14)/2)
         ind.BackgroundColor3=Config.priority==pri.id and Color3.fromRGB(100,210,140) or Color3.fromRGB(50,50,65)
         ind.BorderSizePixel=0; ind.Parent=f; corner(ind,2)
         btns[idx]={btn=f,ind=ind,pri=pri}
-        f.MouseButton1Click:Connect(function()
-            Config.priority=pri.id; Config.stickyTarget=nil
-            for _,b in ipairs(btns) do local isSel=Config.priority==b.pri.id
-                try(function()
-                    TweenService:Create(b.btn,TweenInfo.new(0.15),{BackgroundColor3=isSel and selC or unC}):Play()
-                    TweenService:Create(b.ind,TweenInfo.new(0.15),{BackgroundColor3=isSel and Color3.fromRGB(100,210,140) or Color3.fromRGB(50,50,65)}):Play()
-                end) end end)
+        f.MouseButton1Click:Connect(function() Config.priority=pri.id; Config.stickyTarget=nil
+            for _,b in ipairs(btns) do local isSel=Config.priority==b.pri.id; try(function()
+                TweenService:Create(b.btn,TweenInfo.new(0.15),{BackgroundColor3=isSel and selC or unC}):Play()
+                TweenService:Create(b.ind,TweenInfo.new(0.15),{BackgroundColor3=isSel and Color3.fromRGB(100,210,140) or Color3.fromRGB(50,50,65)}):Play()
+            end) end end)
         hBtn(f,Config.priority==pri.id and selC or unC,Config.priority==pri.id and selH or unH)
     end; return container
+end
+
+local function uiAimPart(par,mob,ord)
+    local con=Instance.new("Frame"); con.Size=UDim2.new(1,0,0,0)
+    con.BackgroundTransparency=1; con.BorderSizePixel=0; con.LayoutOrder=ord
+    if Support.autoSize then try(function() con.AutomaticSize=Enum.AutomaticSize.Y end) end
+    con.Parent=par
+    local lay=Instance.new("UIListLayout"); lay.SortOrder=Enum.SortOrder.LayoutOrder; lay.Padding=UDim.new(0,3); lay.Parent=con
+    if not Support.autoSize then lay:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        con.Size=UDim2.new(1,0,0,lay.AbsoluteContentSize.Y) end) end
+    local sC=Color3.fromRGB(55,100,120); local uC=Color3.fromRGB(28,28,38)
+    local sH=Color3.fromRGB(62,115,135); local uH=Color3.fromRGB(38,38,52)
+    local btns={}
+    for idx,ap in ipairs(AIM_PARTS) do
+        local h=mob and 36 or 30
+        local f=Instance.new("TextButton"); f.Size=UDim2.new(1,0,0,h)
+        f.BackgroundColor3=Config.aimPart==ap.id and sC or uC; f.BorderSizePixel=0
+        f.Font=Enum.Font.GothamBold; f.TextColor3=Color3.fromRGB(235,235,248)
+        f.TextSize=mob and 13 or 12; f.TextXAlignment=Enum.TextXAlignment.Left
+        f.AutoButtonColor=false; f.LayoutOrder=idx; f.Parent=con; corner(f,6)
+        try(function() local tp=Instance.new("UIPadding"); tp.PaddingLeft=UDim.new(0,12); tp.Parent=f end)
+        f.Text=Config.lang=="ru" and ap.ru or ap.en
+        local ind=Instance.new("Frame"); ind.Size=UDim2.new(0,4,0,h-10)
+        ind.Position=UDim2.new(1,-14,0.5,-(h-10)/2)
+        ind.BackgroundColor3=Config.aimPart==ap.id and Color3.fromRGB(100,190,210) or Color3.fromRGB(50,50,65)
+        ind.BorderSizePixel=0; ind.Parent=f; corner(ind,2)
+        btns[idx]={btn=f,ind=ind,ap=ap}
+        f.MouseButton1Click:Connect(function() Config.aimPart=ap.id
+            for _,b in ipairs(btns) do local sel=Config.aimPart==b.ap.id; try(function()
+                TweenService:Create(b.btn,TweenInfo.new(0.15),{BackgroundColor3=sel and sC or uC}):Play()
+                TweenService:Create(b.ind,TweenInfo.new(0.15),{BackgroundColor3=sel and Color3.fromRGB(100,190,210) or Color3.fromRGB(50,50,65)}):Play()
+            end) end end)
+        hBtn(f,Config.aimPart==ap.id and sC or uC,Config.aimPart==ap.id and sH or uH)
+    end; return con
 end
 
 ----------------------------------------------------------------
@@ -928,7 +913,7 @@ local activeSync,friendsCon,friendUpd
 local function destroyAll()
     for _,c in pairs(GC.conn) do try(function() c:Disconnect() end) end
     for _,tw in pairs(GC.tweens) do try(function() tw:Cancel() end) end
-    try(function() RunService:UnbindFromRenderStep("AimbotV31") end)
+    try(function() RunService:UnbindFromRenderStep("AimbotV32") end)
     if Support.drawing then
         try(function() if FovCircle then FovCircle:Remove() end end)
         for _,ln in ipairs(CrossLines) do try(function() ln:Remove() end) end
@@ -936,7 +921,7 @@ local function destroyAll()
     try(function() if mobBtn then mobBtn:Destroy() end end)
     try(function() if showBtn then showBtn:Destroy() end end)
     SPData={}; ThreatData={}; Gui:Destroy()
-    try(function() env._AimbotV31=false end)
+    try(function() env._AimbotV32=false end)
 end
 
 ----------------------------------------------------------------
@@ -968,7 +953,7 @@ local function buildSelect()
     mb.MouseButton1Click:Connect(function() Config.platform="mobile"; selScreen:Destroy(); buildMain() end)
     local vr=Instance.new("TextLabel"); vr.BackgroundTransparency=1; vr.Size=UDim2.new(1,0,0,18)
     vr.Position=UDim2.new(0,0,1,-28); vr.Font=Enum.Font.Gotham; vr.TextColor3=Color3.fromRGB(65,65,82)
-    vr.TextSize=10; vr.Text="Aimbot v3.1"; vr.Parent=selScreen
+    vr.TextSize=10; vr.Text="Aimbot v3.2"; vr.Parent=selScreen
 end
 
 ----------------------------------------------------------------
@@ -1013,7 +998,7 @@ end
 ----------------------------------------------------------------
 function buildMain()
     local mob=Config.platform=="mobile"
-    local W=mob and 300 or 265; local H=mob and 560 or 520
+    local W=mob and 300 or 265; local H=mob and 580 or 540
 
     mainPanel=Instance.new("Frame"); mainPanel.Size=UDim2.new(0,W,0,H)
     mainPanel.Position=mob and UDim2.new(0.5,-W/2,0.03,0) or UDim2.new(1,-W-14,1,-H-14)
@@ -1065,15 +1050,20 @@ function buildMain()
     uiToggle(sc,t("showFov"),Config.showFov,function(v) Config.showFov=v end,nx())
     uiToggle(sc,t("showCross"),Config.showCross,function(v) Config.showCross=v end,nx())
 
-    -- PREDICTION SECTION (reworked)
-    uiHeader(sc,t("prediction"),nx())
+    -- AIM PART
+    uiHeader(sc,t("aimPart"),nx())
+    uiAimPart(sc,mob,nx())
+
+    -- PREDICTION
+    uiHeader(sc,"PREDICTION",nx())
     uiToggle(sc,t("smartPred"),Config.smartPredict,function(v) Config.smartPredict=v end,nx())
     uiToggle(sc,t("autoPing"),Config.autoPing,function(v) Config.autoPing=v end,nx())
     uiPingInfo(sc,nx())
     uiToggle(sc,t("prediction"),Config.prediction,function(v) Config.prediction=v end,nx())
-    uiSlider(sc,t("predValue"),0,0.5,Config.predValue,3,function(v) Config.predValue=v end,nx())
+    uiSlider(sc,t("predValue"),0,0.3,Config.predValue,3,function(v) Config.predValue=v end,nx())
 
-    -- AIM SECTION
+    -- AIM
+    uiHeader(sc,"AIM",nx())
     uiToggle(sc,t("humanLike"),Config.humanLike,function(v) Config.humanLike=v end,nx())
     uiSlider(sc,t("aimSpeed"),0.05,1.0,Config.aimSpeed,2,function(v) Config.aimSpeed=v end,nx())
 
@@ -1112,10 +1102,8 @@ function buildMain()
     if Support.autoSize then try(function() friendsCon.AutomaticSize=Enum.AutomaticSize.Y end) end
     friendsCon.Parent=sc
     local fLay=Instance.new("UIListLayout"); fLay.SortOrder=Enum.SortOrder.LayoutOrder; fLay.Padding=UDim.new(0,3); fLay.Parent=friendsCon
-    if not Support.autoSize then
-        fLay:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
-            friendsCon.Size=UDim2.new(1,0,0,fLay.AbsoluteContentSize.Y) end)
-    end
+    if not Support.autoSize then fLay:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        friendsCon.Size=UDim2.new(1,0,0,fLay.AbsoluteContentSize.Y) end) end
     refreshFL(friendsCon,mob)
     friendUpd=function() refreshFL(friendsCon,mob) end
 
@@ -1172,7 +1160,6 @@ end))
 ----------------------------------------------------------------
 table.insert(GC.conn,RunService.Heartbeat:Connect(function()
     updateThreats()
-    -- Always update smart predict data (even when aim is off)
     for _,p in ipairs(Players:GetPlayers()) do
         if p~=LP and p.Character and alive(p.Character) then
             try(function() spUpdate(p,p.Character) end)
@@ -1183,8 +1170,9 @@ end))
 ----------------------------------------------------------------
 -- RENDER
 ----------------------------------------------------------------
-RunService:BindToRenderStep("AimbotV31",Enum.RenderPriority.Camera.Value+1,function(dt)
+RunService:BindToRenderStep("AimbotV32",Enum.RenderPriority.Camera.Value+1,function(dt)
     Camera=workspace.CurrentCamera
+    lastFrameDt=dt
 
     if Config.fov>=360 then setFovVis(false,0)
     else
