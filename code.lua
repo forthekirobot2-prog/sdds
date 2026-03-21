@@ -1,7 +1,7 @@
 --[[
-    Aimbot v3.2
-    Fixed mobile accuracy + aim part + ping fix
-    Full compatibility
+    Aimbot v3.3
+    Anti-spin fix + close-range stability + shift-lock compatible
+    Full compatibility: PC + Mobile, all executors
 ]]
 
 ----------------------------------------------------------------
@@ -65,7 +65,7 @@ local ABS=math.abs; local SQRT=math.sqrt; local PI=math.pi
 local HUGE=math.huge; local MAX=math.max; local MIN=math.min
 
 ----------------------------------------------------------------
--- PING DETECTION (FIXED: proper round-trip)
+-- PING DETECTION
 ----------------------------------------------------------------
 local cachedPing = 0.1
 local pingMethod = "default"
@@ -130,6 +130,9 @@ local Config = {
     priority     = 1,
     stickyTarget = nil,
     stickyBreak  = 25,
+    -- [v3.3] ANTI-SPIN
+    maxTurnDeg   = 15,
+    closeRange   = 10,
 }
 
 local PRIORITIES = {
@@ -174,6 +177,10 @@ local L = {
         priDesc3="Lowest health first",
         priDesc4="Who damaged you recently",
         priDesc5="Lock on first target found",
+        -- [v3.3]
+        antiSpin="ANTI-SPIN",
+        maxTurn="Max Turn (°/frame)",
+        closeRange="Close Damp Range",
     },
     ru = {
         choose="Выберите версию",pc="ПК",mobile="Телефон",
@@ -195,6 +202,10 @@ local L = {
         priDesc3="Сначала с наименьшим HP",
         priDesc4="Кто недавно нанёс урон",
         priDesc5="Захват первой найденной цели",
+        -- [v3.3]
+        antiSpin="АНТИ-СПИН",
+        maxTurn="Макс. поворот (°/кадр)",
+        closeRange="Зона замедления",
     },
 }
 local function t(k) return (L[Config.lang] or L.en)[k] or k end
@@ -289,7 +300,7 @@ local function getThreat(name)
 end
 
 ----------------------------------------------------------------
--- SMART PREDICT ENGINE v3 (FIXED ACCURACY)
+-- SMART PREDICT ENGINE v3
 ----------------------------------------------------------------
 local SPData = {}
 
@@ -510,7 +521,7 @@ local function simplePred(char)
 end
 
 ----------------------------------------------------------------
--- ROTATION
+-- ROTATION  [v3.3 ANTI-SPIN REWRITE]
 ----------------------------------------------------------------
 local function getYP(cf)
     local lv=cf.LookVector
@@ -527,11 +538,53 @@ end
 local function aDiff(a,b) local d=(b-a)%(2*PI); if d>PI then d=d-2*PI end; return d end
 local function lAng(a,b,f) return a+aDiff(a,b)*f end
 
-local function smoothAim(cur,tgt,fac)
-    local pos=cur.Position; local cy,cp=getYP(cur); local ty,tp=ypTo(pos,tgt)
-    return cfYP(pos,lAng(cy,ty,fac),lAng(cp,tp,fac))
+-- [v3.3] helper: compute distance-based damping multiplier
+local function distDamp(aimPos, camPos)
+    local dist = (aimPos - camPos).Magnitude
+    if dist >= Config.closeRange then return 1.0 end
+    local ratio = CLAMP(dist / Config.closeRange, 0, 1)
+    -- smooth curve: keeps ~60% power at half-range, drops to 15% at point-blank
+    return 0.15 + 0.85 * ratio * ratio
 end
 
+-- [v3.3] helper: clamp yaw/pitch rotation to maxTurnDeg per frame
+local function clampRotation(oldY, oldP, newY, newP, dt)
+    local maxRad = RAD(Config.maxTurnDeg) * CLAMP(dt * 60, 0.5, 3)
+    local maxPitch = maxRad * 0.6 -- pitch axis more restrictive
+
+    local dy = aDiff(oldY, newY)
+    local dp = aDiff(oldP, newP)
+
+    if ABS(dy) > maxRad then
+        newY = oldY + (dy > 0 and maxRad or -maxRad)
+    end
+    if ABS(dp) > maxPitch then
+        newP = oldP + (dp > 0 and maxPitch or -maxPitch)
+    end
+    return newY, newP
+end
+
+-- [v3.3] REWRITTEN: smoothAim now takes dt, applies distance damping + rotation cap
+local function smoothAim(cur, tgt, fac, dt)
+    local pos = cur.Position
+    local cy, cp = getYP(cur)
+    local ty, tp = ypTo(pos, tgt)
+
+    -- distance-based damping
+    local dm = distDamp(tgt, pos)
+    local effectiveFac = fac * dm
+
+    -- interpolate
+    local newY = lAng(cy, ty, effectiveFac)
+    local newP = lAng(cp, tp, effectiveFac)
+
+    -- clamp max rotation per frame
+    newY, newP = clampRotation(cy, cp, newY, newP, dt)
+
+    return cfYP(pos, newY, newP)
+end
+
+-- [v3.3] REWRITTEN: human-like aim with distance damping + rotation cap
 local HA={yO=0,pO=0,yT=0,pT=0,nt=0}
 function HA:tick()
     local now=tick()
@@ -549,7 +602,19 @@ function HA:aim(cur,ap,dt)
     local td=DEG(ABS(aDiff(cy,ty))+ABS(aDiff(cp,tp)))
     local curve=0.12+0.88*CLAMP(td/20,0,1)
     local fac=CLAMP(Config.aimSpeed*curve*dt*60,0.005,0.85)
-    return cfYP(pos,lAng(cy,ty,fac),lAng(cp,tp,fac))
+
+    -- [v3.3] distance damping
+    local dm = distDamp(ap, pos)
+    fac = fac * dm
+
+    -- interpolate
+    local newY = lAng(cy, ty, fac)
+    local newP = lAng(cp, tp, fac)
+
+    -- [v3.3] clamp max rotation
+    newY, newP = clampRotation(cy, cp, newY, newP, dt)
+
+    return cfYP(pos, newY, newP)
 end
 
 ----------------------------------------------------------------
@@ -620,18 +685,36 @@ local function bestTarget()
     return chosen
 end
 
+----------------------------------------------------------------
+-- GET AIM POS  [v3.3 close-range prediction scaling]
+----------------------------------------------------------------
 local function getAimPos(plr)
     local c=plr.Character; if not c then return nil end
     local pos = getAimPartPos(c)
     if not pos then return nil end
 
+    local predOffset = V3(0,0,0)
     if Config.smartPredict then
-        pos = pos + spPredict(plr, c)
+        predOffset = spPredict(plr, c)
     elseif Config.prediction then
-        pos = pos + simplePred(c)
+        predOffset = simplePred(c)
     end
 
-    return pos
+    -- [v3.3] scale prediction down at close range to prevent overshoot/spin
+    if predOffset.Magnitude > 0.01 then
+        local camPos = Camera.CFrame.Position
+        local dist = (pos - camPos).Magnitude
+        if dist < Config.closeRange then
+            predOffset = predOffset * CLAMP(dist / Config.closeRange, 0.05, 1.0)
+        end
+        -- cap prediction to 40% of distance (prevents aim point behind player)
+        local maxPred = MAX(dist * 0.4, 0.5)
+        if predOffset.Magnitude > maxPred then
+            predOffset = predOffset.Unit * maxPred
+        end
+    end
+
+    return pos + predOffset
 end
 
 ----------------------------------------------------------------
@@ -656,10 +739,10 @@ end
 
 try(function()
     local p=try(function() return gethui() end) or game:GetService("CoreGui")
-    local old=p:FindFirstChild("AimbotV32"); if old then old:Destroy() end
+    local old=p:FindFirstChild("AimbotV33"); if old then old:Destroy() end
 end)
 
-local Gui=Instance.new("ScreenGui"); Gui.Name="AimbotV32"; Gui.ResetOnSpawn=false
+local Gui=Instance.new("ScreenGui"); Gui.Name="AimbotV33"; Gui.ResetOnSpawn=false
 try(function() Gui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling end)
 if Support.syn then try(function() syn.protect_gui(Gui) end) end
 if Support.protect then try(function() protect_gui(Gui) end) end
@@ -953,7 +1036,7 @@ local function buildSelect()
     mb.MouseButton1Click:Connect(function() Config.platform="mobile"; selScreen:Destroy(); buildMain() end)
     local vr=Instance.new("TextLabel"); vr.BackgroundTransparency=1; vr.Size=UDim2.new(1,0,0,18)
     vr.Position=UDim2.new(0,0,1,-28); vr.Font=Enum.Font.Gotham; vr.TextColor3=Color3.fromRGB(65,65,82)
-    vr.TextSize=10; vr.Text="Aimbot v3.2"; vr.Parent=selScreen
+    vr.TextSize=10; vr.Text="Aimbot v3.3"; vr.Parent=selScreen
 end
 
 ----------------------------------------------------------------
@@ -1088,6 +1171,11 @@ function buildMain()
                 end end) end)
     end
 
+    -- [v3.3] ANTI-SPIN SECTION
+    uiHeader(sc,t("antiSpin"),nx())
+    uiSlider(sc,t("maxTurn"),3,30,Config.maxTurnDeg,0,function(v) Config.maxTurnDeg=v end,nx())
+    uiSlider(sc,t("closeRange"),3,25,Config.closeRange,0,function(v) Config.closeRange=v end,nx())
+
     uiHeader(sc,t("priority"),nx())
     uiPriority(sc,mob,nx())
     uiSlider(sc,t("stickyBreak"),5,100,Config.stickyBreak,0,function(v) Config.stickyBreak=v end,nx())
@@ -1168,7 +1256,7 @@ table.insert(GC.conn,RunService.Heartbeat:Connect(function()
 end))
 
 ----------------------------------------------------------------
--- RENDER
+-- RENDER  [v3.3 ANTI-SPIN FIX]
 ----------------------------------------------------------------
 RunService:BindToRenderStep("AimbotV32",Enum.RenderPriority.Camera.Value+1,function(dt)
     Camera=workspace.CurrentCamera
@@ -1195,8 +1283,14 @@ RunService:BindToRenderStep("AimbotV32",Enum.RenderPriority.Camera.Value+1,funct
         if onS then setCrossVis(true); updateCross(sp.X,sp.Y) else setCrossVis(false) end
     else setCrossVis(false) end
 
-    if Config.humanLike then Camera.CFrame=HA:aim(Camera.CFrame,ap,dt)
-    else Camera.CFrame=smoothAim(Camera.CFrame,ap,1.0) end
+    -- [v3.3] ANTI-SPIN: human-like uses HA:aim with built-in damping
+    -- non-human uses high factor BUT smoothAim now has distance damping + rotation cap
+    if Config.humanLike then
+        Camera.CFrame=HA:aim(Camera.CFrame,ap,dt)
+    else
+        local baseFac = CLAMP(Config.aimSpeed * 2.5, 0.3, 0.9)
+        Camera.CFrame=smoothAim(Camera.CFrame,ap,baseFac,dt)
+    end
 end)
 
 ----------------------------------------------------------------
