@@ -1,0 +1,1295 @@
+--[[
+    IMKOMOD GUI - Dandy's World
+    Features: Wall TP / Fly / Speed / Fullbright
+    Universal - any executor, PC + Mobile
+]]
+
+if _G._ImkoCleanup then
+    pcall(_G._ImkoCleanup)
+end
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local WS = game:GetService("Workspace")
+local Lighting = game:GetService("Lighting")
+
+local player = Players.LocalPlayer
+local camera = WS.CurrentCamera
+
+local compat = {
+    hasGC = pcall(function() return getconnections end)
+        and type(getconnections) == "function",
+    hasHM = pcall(function() return hookmetamethod end)
+        and type(hookmetamethod) == "function",
+    hasGN = pcall(function() return getnamecallmethod end)
+        and type(getnamecallmethod) == "function",
+    hasNC = pcall(function() return newcclosure end)
+        and type(newcclosure) == "function",
+}
+
+local function safeWrap(fn)
+    if compat.hasNC then return newcclosure(fn) end
+    return fn
+end
+
+local cfg = {
+    platform = nil,
+    binds = {
+        walltp = Enum.KeyCode.V,
+        fly = Enum.KeyCode.G,
+        speed = Enum.KeyCode.X,
+    },
+    flyActive = false,
+    speedActive = false,
+    fullbrightActive = false,
+    listening = nil,
+    flySpeed = 48,
+    flyVSpeed = 24,
+    speedValue = 65,
+    maxSafeWS = 38,
+    maxWallThick = 25,
+    tpOffset = 2.5,
+    cooldown = 0.3,
+}
+
+local state = {
+    conns = {},
+    keys = {},
+    acKilled = false,
+    killCount = 0,
+    lastTP = 0,
+    origWS = 16,
+    origJP = 50,
+    origJH = 0,
+    sliderDragging = false,
+    origLighting = {},
+    disabledEffects = {},
+}
+
+local function getChar() return player.Character end
+local function getHRP()
+    local c = getChar()
+    return c and c:FindFirstChild("HumanoidRootPart")
+end
+local function getHum()
+    local c = getChar()
+    return c and c:FindFirstChildOfClass("Humanoid")
+end
+local function clamp(v, mn, mx)
+    return math.max(mn, math.min(mx, v))
+end
+local function lerp(a, b, t) return a + (b - a) * t end
+
+-- ===================================
+-- AC KILLER
+-- ===================================
+
+local function killACListeners()
+    if not compat.hasGC then return 0 end
+    local char = getChar()
+    if not char then return 0 end
+    local killed = 0
+
+    for _, part in ipairs(char:GetDescendants()) do
+        if part:IsA("BasePart") then
+            for _, prop in ipairs({
+                "CanCollide","Size","Velocity",
+                "CFrame","Position","Transparency"
+            }) do
+                pcall(function()
+                    for _, c in ipairs(
+                        getconnections(
+                            part:GetPropertyChangedSignal(prop)
+                        )
+                    ) do
+                        c:Disable(); killed = killed + 1
+                    end
+                end)
+            end
+            pcall(function()
+                for _, c in ipairs(getconnections(part.Changed)) do
+                    c:Disable(); killed = killed + 1
+                end
+            end)
+        end
+    end
+
+    local hum = getHum()
+    if hum then
+        for _, prop in ipairs({
+            "WalkSpeed","JumpPower","JumpHeight",
+            "Health","HipHeight"
+        }) do
+            pcall(function()
+                for _, c in ipairs(
+                    getconnections(
+                        hum:GetPropertyChangedSignal(prop)
+                    )
+                ) do
+                    c:Disable(); killed = killed + 1
+                end
+            end)
+        end
+        pcall(function()
+            for _, c in ipairs(getconnections(hum.Changed)) do
+                c:Disable(); killed = killed + 1
+            end
+        end)
+        pcall(function()
+            for _, c in ipairs(getconnections(hum.StateChanged)) do
+                c:Disable(); killed = killed + 1
+            end
+        end)
+    end
+
+    for _, ev in ipairs({"ChildAdded","DescendantAdded","ChildRemoved"}) do
+        pcall(function()
+            for _, c in ipairs(getconnections(char[ev])) do
+                c:Disable(); killed = killed + 1
+            end
+        end)
+    end
+
+    return killed
+end
+
+local function killRemoteListeners()
+    if not compat.hasGC then return 0 end
+    local killed = 0
+    pcall(function()
+        for _, r in ipairs(
+            game:GetService("ReplicatedStorage"):GetDescendants()
+        ) do
+            if r:IsA("RemoteEvent") or r:IsA("RemoteFunction") then
+                local n = r.Name:lower()
+                if n:find("anti") or n:find("cheat")
+                    or n:find("detect") or n:find("kick")
+                    or n:find("ban") or n:find("valid")
+                    or n:find("check") or n:find("verify")
+                    or n:find("security") or n:find("flag") then
+                    if r:IsA("RemoteEvent") then
+                        pcall(function()
+                            for _, c in ipairs(
+                                getconnections(r.OnClientEvent)
+                            ) do
+                                c:Disable(); killed = killed + 1
+                            end
+                        end)
+                    end
+                end
+            end
+        end
+    end)
+    return killed
+end
+
+local function hookACRemotes()
+    if not compat.hasHM or not compat.hasGN then return end
+    pcall(function()
+        local old
+        old = hookmetamethod(game, "__namecall",
+            safeWrap(function(self, ...)
+                local m = getnamecallmethod()
+                if m == "FireServer" or m == "InvokeServer" then
+                    if self:IsA("RemoteEvent")
+                        or self:IsA("RemoteFunction") then
+                        local n = self.Name:lower()
+                        if n:find("anti") or n:find("cheat")
+                            or n:find("detect") or n:find("kick")
+                            or n:find("ban") or n:find("valid")
+                            or n:find("check") or n:find("verify")
+                            or n:find("security") or n:find("flag") then
+                            return nil
+                        end
+                    end
+                end
+                return old(self, ...)
+            end)
+        )
+    end)
+end
+
+local function runACKill()
+    if state.acKilled then return end
+    local k1 = killACListeners()
+    local k2 = killRemoteListeners()
+    hookACRemotes()
+    state.killCount = k1 + k2
+    state.acKilled = true
+end
+
+-- ===================================
+-- WALL TP
+-- ===================================
+
+local function getMoveDirection()
+    local hum = getHum()
+    if hum and hum.MoveDirection.Magnitude > 0.1 then
+        return hum.MoveDirection.Unit
+    end
+    local look = camera.CFrame.LookVector
+    return Vector3.new(look.X, 0, look.Z).Unit
+end
+
+local function wallTP()
+    local hrp = getHRP()
+    local char = getChar()
+    if not hrp or not char then return false end
+    if tick() - state.lastTP < cfg.cooldown then return false end
+
+    local dir = getMoveDirection()
+    if not dir then return false end
+
+    local rp = RaycastParams.new()
+    rp.FilterDescendantsInstances = {char}
+    rp.FilterType = Enum.RaycastFilterType.Exclude
+
+    local origin = hrp.Position
+    local fwdHit = WS:Raycast(origin, dir * cfg.maxWallThick, rp)
+    if not fwdHit then return false end
+
+    local backOrigin = origin + dir * cfg.maxWallThick
+    local backHit = WS:Raycast(backOrigin, -dir * cfg.maxWallThick, rp)
+
+    local target
+    if backHit then
+        target = backHit.Position + dir * cfg.tpOffset
+    else
+        local dist = (fwdHit.Position - origin).Magnitude
+        target = origin + dir * (dist + 6)
+    end
+    target = Vector3.new(target.X, origin.Y, target.Z)
+
+    local floorHit = WS:Raycast(
+        target + Vector3.new(0, 5, 0),
+        Vector3.new(0, -50, 0), rp
+    )
+    if floorHit then
+        target = Vector3.new(target.X, floorHit.Position.Y + 3, target.Z)
+    end
+
+    local _, ry, _ = hrp.CFrame:ToEulerAnglesYXZ()
+    hrp.CFrame = CFrame.new(target) * CFrame.Angles(0, ry, 0)
+    hrp.Velocity = Vector3.new(0, 0, 0)
+    pcall(function()
+        hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+    end)
+
+    state.lastTP = tick()
+    return true
+end
+
+-- ===================================
+-- FLY
+-- ===================================
+
+local function startFly()
+    local hum = getHum()
+    if not hum then return end
+    state.origWS = hum.WalkSpeed
+    state.origJP = hum.JumpPower
+    state.origJH = hum.JumpHeight
+
+    state.conns.fly = RunService.Stepped:Connect(function(_, dt)
+        local hrp = getHRP()
+        local hum2 = getHum()
+        local char = getChar()
+        if not hrp or not hum2 or not char then return end
+
+        for _, p in ipairs(char:GetDescendants()) do
+            if p:IsA("BasePart") then p.CanCollide = false end
+        end
+
+        hum2.WalkSpeed = 0
+        hum2.JumpPower = 0
+        hum2.JumpHeight = 0
+
+        local camCF = camera.CFrame
+        local md = hum2.MoveDirection
+        local vel = Vector3.new(0,0,0)
+
+        if md.Magnitude > 0.1 then
+            local cL = camCF.LookVector
+            local cR = camCF.RightVector
+            local fwd = Vector3.new(cL.X,0,cL.Z).Unit
+            local rgt = Vector3.new(cR.X,0,cR.Z).Unit
+            vel = (fwd * md:Dot(fwd) + rgt * md:Dot(rgt)).Unit * cfg.flySpeed
+        end
+
+        local vy = 0
+        if state.keys[Enum.KeyCode.Space] or state.keys["up"] then
+            vy = cfg.flyVSpeed
+        elseif state.keys[Enum.KeyCode.LeftShift]
+            or state.keys[Enum.KeyCode.LeftControl]
+            or state.keys["down"] then
+            vy = -cfg.flyVSpeed
+        end
+
+        local mv = vel * dt
+        hrp.CFrame = hrp.CFrame + Vector3.new(mv.X, vy * dt, mv.Z)
+        hrp.Velocity = Vector3.new(0,0,0)
+        pcall(function()
+            hrp.AssemblyLinearVelocity = Vector3.new(0,0,0)
+        end)
+        hum2:ChangeState(Enum.HumanoidStateType.Running)
+    end)
+end
+
+local function stopFly()
+    if state.conns.fly then
+        state.conns.fly:Disconnect()
+        state.conns.fly = nil
+    end
+    local hum = getHum()
+    if hum then
+        hum.WalkSpeed = state.origWS or 16
+        hum.JumpPower = state.origJP or 50
+        hum.JumpHeight = state.origJH or 0
+    end
+    local char = getChar()
+    if char then
+        for _, p in ipairs(char:GetDescendants()) do
+            if p:IsA("BasePart") then p.CanCollide = true end
+        end
+    end
+    local hrp = getHRP()
+    if hrp and char then
+        local rp = RaycastParams.new()
+        rp.FilterDescendantsInstances = {char}
+        rp.FilterType = Enum.RaycastFilterType.Exclude
+        local hit = WS:Raycast(hrp.Position, Vector3.new(0,-500,0), rp)
+        if hit then
+            local _, ry, _ = hrp.CFrame:ToEulerAnglesYXZ()
+            hrp.CFrame = CFrame.new(hit.Position + Vector3.new(0,3,0))
+                * CFrame.Angles(0, ry, 0)
+        end
+        hrp.Velocity = Vector3.new(0,0,0)
+        pcall(function()
+            hrp.AssemblyLinearVelocity = Vector3.new(0,0,0)
+        end)
+    end
+    state.keys = {}
+end
+
+-- ===================================
+-- SPEEDHACK
+-- ===================================
+
+local function startSpeed()
+    local hum = getHum()
+    if not hum then return end
+    state.origWS = hum.WalkSpeed
+
+    state.conns.speed = RunService.Stepped:Connect(function(_, dt)
+        local hrp = getHRP()
+        local hum2 = getHum()
+        if not hrp or not hum2 then return end
+
+        local target = cfg.speedValue
+        if target <= cfg.maxSafeWS then
+            hum2.WalkSpeed = target
+            return
+        end
+
+        hum2.WalkSpeed = cfg.maxSafeWS
+        local md = hum2.MoveDirection
+        if md.Magnitude < 0.1 then return end
+
+        local extra = target - cfg.maxSafeWS
+        local nudge = md.Unit * extra * dt
+        hrp.CFrame = hrp.CFrame + Vector3.new(nudge.X, 0, nudge.Z)
+    end)
+end
+
+local function stopSpeed()
+    if state.conns.speed then
+        state.conns.speed:Disconnect()
+        state.conns.speed = nil
+    end
+    local hum = getHum()
+    if hum then hum.WalkSpeed = state.origWS or 16 end
+end
+
+-- ===================================
+-- FULLBRIGHT
+-- ===================================
+
+local function startFullbright()
+    state.origLighting = {
+        Brightness = Lighting.Brightness,
+        ClockTime = Lighting.ClockTime,
+        FogEnd = Lighting.FogEnd,
+        GlobalShadows = Lighting.GlobalShadows,
+        Ambient = Lighting.Ambient,
+        OutdoorAmbient = Lighting.OutdoorAmbient,
+    }
+
+    Lighting.Brightness = 2
+    Lighting.ClockTime = 14
+    Lighting.FogEnd = 100000
+    Lighting.GlobalShadows = false
+    Lighting.Ambient = Color3.fromRGB(178, 178, 178)
+    Lighting.OutdoorAmbient = Color3.fromRGB(178, 178, 178)
+
+    state.disabledEffects = {}
+    for _, effect in ipairs(Lighting:GetChildren()) do
+        if effect:IsA("ColorCorrectionEffect")
+            or effect:IsA("BloomEffect")
+            or effect:IsA("BlurEffect")
+            or effect:IsA("DepthOfFieldEffect")
+            or effect:IsA("SunRaysEffect") then
+            if effect.Enabled then
+                effect.Enabled = false
+                table.insert(state.disabledEffects, effect)
+            end
+        end
+    end
+end
+
+local function stopFullbright()
+    if state.origLighting.Brightness then
+        Lighting.Brightness = state.origLighting.Brightness
+        Lighting.ClockTime = state.origLighting.ClockTime
+        Lighting.FogEnd = state.origLighting.FogEnd
+        Lighting.GlobalShadows = state.origLighting.GlobalShadows
+        Lighting.Ambient = state.origLighting.Ambient
+        Lighting.OutdoorAmbient = state.origLighting.OutdoorAmbient
+    end
+    for _, e in ipairs(state.disabledEffects) do
+        pcall(function() e.Enabled = true end)
+    end
+    state.disabledEffects = {}
+end
+
+-- ===================================
+-- RESPAWN
+-- ===================================
+
+player.CharacterAdded:Connect(function(char)
+    char:WaitForChild("HumanoidRootPart")
+    char:WaitForChild("Humanoid")
+    task.wait(2)
+    state.acKilled = false
+    runACKill()
+    if cfg.flyActive then stopFly(); cfg.flyActive = true; startFly() end
+    if cfg.speedActive then
+        stopSpeed(); cfg.speedActive = true; startSpeed()
+    end
+    if cfg.fullbrightActive then startFullbright() end
+end)
+
+-- ===================================
+-- INPUT
+-- ===================================
+
+local inputConns = {}
+
+inputConns[1] = UIS.InputBegan:Connect(function(input, gpe)
+    if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
+
+    if cfg.listening then
+        cfg.binds[cfg.listening] = input.KeyCode
+        cfg.listening = nil
+        if _G._ImkoBindUpdate then _G._ImkoBindUpdate() end
+        return
+    end
+
+    if cfg.flyActive then
+        if input.KeyCode == Enum.KeyCode.Space
+            or input.KeyCode == Enum.KeyCode.LeftShift
+            or input.KeyCode == Enum.KeyCode.LeftControl then
+            state.keys[input.KeyCode] = true
+        end
+    end
+
+    if gpe then return end
+    state.keys[input.KeyCode] = true
+
+    if cfg.platform == "pc" then
+        if input.KeyCode == cfg.binds.walltp then
+            runACKill()
+            local ok = wallTP()
+            if _G._ImkoWallStatus then _G._ImkoWallStatus(ok) end
+        end
+        if input.KeyCode == cfg.binds.fly then
+            runACKill()
+            cfg.flyActive = not cfg.flyActive
+            if cfg.flyActive then startFly() else stopFly() end
+            if _G._ImkoFlyUpdate then _G._ImkoFlyUpdate(cfg.flyActive) end
+        end
+        if input.KeyCode == cfg.binds.speed then
+            runACKill()
+            cfg.speedActive = not cfg.speedActive
+            if cfg.speedActive then startSpeed() else stopSpeed() end
+            if _G._ImkoSpeedUpdate then
+                _G._ImkoSpeedUpdate(cfg.speedActive)
+            end
+        end
+    end
+end)
+
+inputConns[2] = UIS.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.Keyboard then
+        state.keys[input.KeyCode] = nil
+    end
+end)
+
+-- ===================================
+-- GUI
+-- ===================================
+
+pcall(function()
+    local p = game:GetService("CoreGui"):FindFirstChild("_Imko")
+    if p then p:Destroy() end
+end)
+local prev = player.PlayerGui:FindFirstChild("_Imko")
+if prev then prev:Destroy() end
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "_Imko"
+gui.ResetOnSpawn = false
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+pcall(function() gui.Parent = game:GetService("CoreGui") end)
+if not gui.Parent then gui.Parent = player.PlayerGui end
+
+local C = {
+    bg     = Color3.fromRGB(10, 10, 14),
+    border = Color3.fromRGB(32, 32, 42),
+    text   = Color3.fromRGB(200, 200, 208),
+    dim    = Color3.fromRGB(80, 80, 92),
+    accent = Color3.fromRGB(60, 100, 215),
+    btn    = Color3.fromRGB(20, 20, 28),
+    btnOn  = Color3.fromRGB(38, 82, 185),
+    hov    = Color3.fromRGB(30, 30, 40),
+    red    = Color3.fromRGB(185, 40, 40),
+    green  = Color3.fromRGB(40, 170, 65),
+    yellow = Color3.fromRGB(200, 170, 42),
+    orange = Color3.fromRGB(210, 130, 32),
+    slider = Color3.fromRGB(45, 45, 58),
+    sFill  = Color3.fromRGB(60, 100, 215),
+    knob   = Color3.fromRGB(200, 200, 210),
+}
+
+local twF = TweenInfo.new(0.1, Enum.EasingStyle.Quad)
+local twM = TweenInfo.new(0.2, Enum.EasingStyle.Quad)
+
+local function mk(cls, props)
+    local i = Instance.new(cls)
+    for k, v in pairs(props) do
+        if k ~= "Parent" then i[k] = v end
+    end
+    if props.Parent then i.Parent = props.Parent end
+    return i
+end
+
+local function corner(p, r)
+    mk("UICorner", {CornerRadius = UDim.new(0, r or 6), Parent = p})
+end
+
+local function stroke(p)
+    mk("UIStroke", {Color = C.border, Thickness = 1, Parent = p})
+end
+
+local function addHover(btn)
+    btn.MouseEnter:Connect(function()
+        TweenService:Create(btn, twF, {BackgroundColor3 = C.hov}):Play()
+    end)
+    btn.MouseLeave:Connect(function()
+        TweenService:Create(btn, twF, {BackgroundColor3 = C.btn}):Play()
+    end)
+end
+
+local function makeDrag(frame, handle)
+    handle = handle or frame
+    local d, ds, sp
+    handle.InputBegan:Connect(function(i)
+        if state.sliderDragging then return end
+        if i.UserInputType == Enum.UserInputType.MouseButton1
+            or i.UserInputType == Enum.UserInputType.Touch then
+            d = true; ds = i.Position; sp = frame.Position
+            i.Changed:Connect(function()
+                if i.UserInputState == Enum.UserInputState.End then
+                    d = false
+                end
+            end)
+        end
+    end)
+    UIS.InputChanged:Connect(function(i)
+        if state.sliderDragging then d = false; return end
+        if d and (i.UserInputType == Enum.UserInputType.MouseMovement
+            or i.UserInputType == Enum.UserInputType.Touch) then
+            local delta = i.Position - ds
+            frame.Position = UDim2.new(
+                sp.X.Scale, sp.X.Offset + delta.X,
+                sp.Y.Scale, sp.Y.Offset + delta.Y
+            )
+        end
+    end)
+end
+
+local function createSlider(parent, pos, minVal, maxVal, default, onChange)
+    local frame = mk("Frame", {
+        Size = UDim2.new(1, -16, 0, 36),
+        Position = pos,
+        BackgroundTransparency = 1,
+        Parent = parent,
+    })
+
+    local valLabel = mk("TextLabel", {
+        Size = UDim2.new(0, 40, 0, 16),
+        Position = UDim2.new(1, -40, 0, 0),
+        BackgroundTransparency = 1,
+        Text = tostring(default),
+        TextColor3 = C.text, TextSize = 11,
+        Font = Enum.Font.GothamBold,
+        TextXAlignment = Enum.TextXAlignment.Right,
+        Parent = frame,
+    })
+
+    mk("TextLabel", {
+        Size = UDim2.new(1, -48, 0, 16),
+        Position = UDim2.new(0, 0, 0, 0),
+        BackgroundTransparency = 1,
+        Text = "Speed: " .. minVal .. " - " .. maxVal,
+        TextColor3 = C.dim, TextSize = 9,
+        Font = Enum.Font.Gotham,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Parent = frame,
+    })
+
+    local track = mk("Frame", {
+        Size = UDim2.new(1, 0, 0, 8),
+        Position = UDim2.new(0, 0, 0, 22),
+        BackgroundColor3 = C.slider,
+        BorderSizePixel = 0,
+        Parent = frame,
+    })
+    corner(track, 4)
+
+    local initF = (default - minVal) / (maxVal - minVal)
+
+    local fill = mk("Frame", {
+        Size = UDim2.new(initF, 0, 1, 0),
+        BackgroundColor3 = C.sFill,
+        BorderSizePixel = 0,
+        Parent = track,
+    })
+    corner(fill, 4)
+
+    local knob = mk("Frame", {
+        Size = UDim2.new(0, 16, 0, 16),
+        Position = UDim2.new(initF, -8, 0.5, -8),
+        BackgroundColor3 = C.knob,
+        BorderSizePixel = 0,
+        ZIndex = 5,
+        Parent = track,
+    })
+    corner(knob, 8)
+
+    local safeP = (40 - minVal) / (maxVal - minVal)
+    mk("Frame", {
+        Size = UDim2.new(0, 2, 1, 6),
+        Position = UDim2.new(safeP, -1, 0, -3),
+        BackgroundColor3 = C.red,
+        BorderSizePixel = 0,
+        ZIndex = 4,
+        Parent = track,
+    })
+
+    local function updateS(inputPos)
+        local tA = track.AbsolutePosition
+        local tS = track.AbsoluteSize
+        local rel = clamp((inputPos.X - tA.X) / tS.X, 0, 1)
+        local val = math.floor(lerp(minVal, maxVal, rel))
+
+        fill.Size = UDim2.new(rel, 0, 1, 0)
+        knob.Position = UDim2.new(rel, -8, 0.5, -8)
+        valLabel.Text = tostring(val)
+
+        if val <= 40 then
+            fill.BackgroundColor3 = C.green
+            valLabel.TextColor3 = C.green
+        elseif val <= 100 then
+            fill.BackgroundColor3 = C.sFill
+            valLabel.TextColor3 = C.text
+        elseif val <= 200 then
+            fill.BackgroundColor3 = C.orange
+            valLabel.TextColor3 = C.orange
+        else
+            fill.BackgroundColor3 = C.red
+            valLabel.TextColor3 = C.red
+        end
+
+        if onChange then onChange(val) end
+    end
+
+    track.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1
+            or i.UserInputType == Enum.UserInputType.Touch then
+            state.sliderDragging = true
+            updateS(i.Position)
+        end
+    end)
+
+    knob.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1
+            or i.UserInputType == Enum.UserInputType.Touch then
+            state.sliderDragging = true
+        end
+    end)
+
+    UIS.InputChanged:Connect(function(i)
+        if state.sliderDragging and (
+            i.UserInputType == Enum.UserInputType.MouseMovement
+            or i.UserInputType == Enum.UserInputType.Touch
+        ) then
+            updateS(i.Position)
+        end
+    end)
+
+    UIS.InputEnded:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1
+            or i.UserInputType == Enum.UserInputType.Touch then
+            state.sliderDragging = false
+        end
+    end)
+
+    return frame
+end
+
+-- ========== PLATFORM SELECT ==========
+
+local selFrame = mk("Frame", {
+    Size = UDim2.new(0, 220, 0, 165),
+    Position = UDim2.new(0.5, -110, 0.5, -82),
+    BackgroundColor3 = C.bg,
+    BorderSizePixel = 0,
+    Parent = gui,
+})
+corner(selFrame, 8); stroke(selFrame); makeDrag(selFrame)
+
+mk("TextLabel", {
+    Size = UDim2.new(1, -16, 0, 28),
+    Position = UDim2.new(0, 8, 0, 8),
+    BackgroundTransparency = 1,
+    Text = "IMKOMOD",
+    TextColor3 = C.text, TextSize = 17,
+    Font = Enum.Font.GothamBold,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    Parent = selFrame,
+})
+
+mk("TextLabel", {
+    Size = UDim2.new(1, -16, 0, 16),
+    Position = UDim2.new(0, 8, 0, 34),
+    BackgroundTransparency = 1,
+    Text = "Select platform",
+    TextColor3 = C.dim, TextSize = 11,
+    Font = Enum.Font.GothamMedium,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    Parent = selFrame,
+})
+
+mk("Frame", {
+    Size = UDim2.new(1, -16, 0, 1),
+    Position = UDim2.new(0, 8, 0, 58),
+    BackgroundColor3 = C.border,
+    BorderSizePixel = 0,
+    Parent = selFrame,
+})
+
+local pcBtnSel = mk("TextButton", {
+    Size = UDim2.new(1, -16, 0, 34),
+    Position = UDim2.new(0, 8, 0, 68),
+    BackgroundColor3 = C.btn, BorderSizePixel = 0,
+    Text = "PC", TextColor3 = C.text,
+    TextSize = 13, Font = Enum.Font.GothamBold,
+    Parent = selFrame,
+})
+corner(pcBtnSel, 6); addHover(pcBtnSel)
+
+local mobBtnSel = mk("TextButton", {
+    Size = UDim2.new(1, -16, 0, 34),
+    Position = UDim2.new(0, 8, 0, 110),
+    BackgroundColor3 = C.btn, BorderSizePixel = 0,
+    Text = "Mobile", TextColor3 = C.text,
+    TextSize = 13, Font = Enum.Font.GothamBold,
+    Parent = selFrame,
+})
+corner(mobBtnSel, 6); addHover(mobBtnSel)
+
+-- ========== MAIN PANEL ==========
+
+local pcH, mobH = 360, 240
+
+local mainFrame = mk("Frame", {
+    Name = "Main",
+    Size = UDim2.new(0, 245, 0, pcH),
+    Position = UDim2.new(0.5, -122, 0.5, -180),
+    BackgroundColor3 = C.bg,
+    BorderSizePixel = 0,
+    Visible = false,
+    ClipsDescendants = true,
+    Parent = gui,
+})
+corner(mainFrame, 8); stroke(mainFrame); makeDrag(mainFrame)
+
+local titleBar = mk("Frame", {
+    Size = UDim2.new(1, 0, 0, 40),
+    BackgroundColor3 = C.bg,
+    BorderSizePixel = 0,
+    ZIndex = 10,
+    Parent = mainFrame,
+})
+
+mk("TextLabel", {
+    Size = UDim2.new(1, -40, 0, 28),
+    Position = UDim2.new(0, 10, 0, 6),
+    BackgroundTransparency = 1,
+    Text = "IMKOMOD", TextColor3 = C.text,
+    TextSize = 15, Font = Enum.Font.GothamBold,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    ZIndex = 10,
+    Parent = titleBar,
+})
+
+local minBtn = mk("TextButton", {
+    Size = UDim2.new(0, 24, 0, 24),
+    Position = UDim2.new(1, -32, 0, 8),
+    BackgroundColor3 = C.btn, BorderSizePixel = 0,
+    Text = "-", TextColor3 = C.dim,
+    TextSize = 15, Font = Enum.Font.GothamBold,
+    ZIndex = 10,
+    Parent = titleBar,
+})
+corner(minBtn, 6); addHover(minBtn)
+
+mk("Frame", {
+    Size = UDim2.new(1, -16, 0, 1),
+    Position = UDim2.new(0, 8, 1, -1),
+    BackgroundColor3 = C.border, BorderSizePixel = 0,
+    ZIndex = 10,
+    Parent = titleBar,
+})
+
+local scroll = mk("ScrollingFrame", {
+    Size = UDim2.new(1, 0, 1, -40),
+    Position = UDim2.new(0, 0, 0, 40),
+    BackgroundTransparency = 1,
+    BorderSizePixel = 0,
+    ScrollBarThickness = 3,
+    ScrollBarImageColor3 = C.border,
+    CanvasSize = UDim2.new(0, 0, 0, 380),
+    Parent = mainFrame,
+})
+
+local function makeRow(yPos, label, btnText, btnColor)
+    local row = mk("Frame", {
+        Size = UDim2.new(1, -16, 0, 28),
+        Position = UDim2.new(0, 8, 0, yPos),
+        BackgroundTransparency = 1,
+        Parent = scroll,
+    })
+    mk("TextLabel", {
+        Size = UDim2.new(0.6, 0, 1, 0),
+        BackgroundTransparency = 1,
+        Text = label, TextColor3 = C.text,
+        TextSize = 12, Font = Enum.Font.GothamMedium,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Parent = row,
+    })
+    local btn = mk("TextButton", {
+        Size = UDim2.new(0, 52, 0, 22),
+        Position = UDim2.new(1, -52, 0.5, -11),
+        BackgroundColor3 = C.btn, BorderSizePixel = 0,
+        Text = btnText, TextColor3 = btnColor or C.red,
+        TextSize = 10, Font = Enum.Font.GothamBold,
+        Parent = row,
+    })
+    corner(btn, 5)
+    return btn
+end
+
+local function makeLabel(yPos, text)
+    return mk("TextLabel", {
+        Size = UDim2.new(1, -16, 0, 12),
+        Position = UDim2.new(0, 8, 0, yPos),
+        BackgroundTransparency = 1,
+        Text = text,
+        TextColor3 = Color3.fromRGB(50, 50, 60),
+        TextSize = 8, Font = Enum.Font.Gotham,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Parent = scroll,
+    })
+end
+
+local function makeSep(yPos)
+    mk("Frame", {
+        Size = UDim2.new(1, -16, 0, 1),
+        Position = UDim2.new(0, 8, 0, yPos),
+        BackgroundColor3 = C.border, BorderSizePixel = 0,
+        Parent = scroll,
+    })
+end
+
+-- AC Status
+local acRow = mk("Frame", {
+    Size = UDim2.new(1, -16, 0, 18),
+    Position = UDim2.new(0, 8, 0, 4),
+    BackgroundTransparency = 1,
+    Parent = scroll,
+})
+mk("TextLabel", {
+    Size = UDim2.new(0.5, 0, 1, 0),
+    BackgroundTransparency = 1,
+    Text = "Anti-cheat", TextColor3 = C.dim,
+    TextSize = 9, Font = Enum.Font.GothamMedium,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    Parent = acRow,
+})
+local acLbl = mk("TextLabel", {
+    Size = UDim2.new(0.5, 0, 1, 0),
+    Position = UDim2.new(0.5, 0, 0, 0),
+    BackgroundTransparency = 1,
+    Text = "waiting", TextColor3 = C.yellow,
+    TextSize = 9, Font = Enum.Font.GothamBold,
+    TextXAlignment = Enum.TextXAlignment.Right,
+    Parent = acRow,
+})
+
+makeSep(28)
+
+-- WALL TP
+local ncBtn = makeRow(36, "Wall TP", "[V]", C.accent)
+local ncStatus = makeLabel(66, "")
+
+-- FLY
+local flyBtn = makeRow(82, "Fly", "OFF", C.red)
+makeLabel(112, "Space up / Shift down / WASD move")
+
+-- SPEED
+local spdBtn = makeRow(130, "Speed", "OFF", C.red)
+createSlider(scroll, UDim2.new(0, 8, 0, 160), 1, 400, 65,
+    function(val) cfg.speedValue = val end
+)
+makeLabel(198, "WS 38 + CFrame nudge bypass")
+
+makeSep(216)
+
+-- FULLBRIGHT
+local fbBtn = makeRow(224, "Fullbright", "OFF", C.red)
+makeLabel(254, "Removes darkness and effects")
+
+makeSep(272)
+
+-- BINDS (PC)
+local bindSection = mk("Frame", {
+    Name = "Binds",
+    Size = UDim2.new(1, -16, 0, 90),
+    Position = UDim2.new(0, 8, 0, 280),
+    BackgroundTransparency = 1,
+    Parent = scroll,
+})
+
+local bindData = {
+    {name = "Wall TP", key = "walltp", y = 0},
+    {name = "Fly", key = "fly", y = 26},
+    {name = "Speed", key = "speed", y = 52},
+}
+
+local bindBtns = {}
+
+for _, bd in ipairs(bindData) do
+    local row = mk("Frame", {
+        Size = UDim2.new(1, 0, 0, 22),
+        Position = UDim2.new(0, 0, 0, bd.y),
+        BackgroundTransparency = 1,
+        Parent = bindSection,
+    })
+    mk("TextLabel", {
+        Size = UDim2.new(0.6, 0, 1, 0),
+        BackgroundTransparency = 1,
+        Text = bd.name .. " bind", TextColor3 = C.dim,
+        TextSize = 9, Font = Enum.Font.Gotham,
+        TextXAlignment = Enum.TextXAlignment.Left,
+        Parent = row,
+    })
+    local bb = mk("TextButton", {
+        Size = UDim2.new(0, 40, 0, 18),
+        Position = UDim2.new(1, -40, 0.5, -9),
+        BackgroundColor3 = C.btn, BorderSizePixel = 0,
+        Text = cfg.binds[bd.key].Name,
+        TextColor3 = C.accent,
+        TextSize = 9, Font = Enum.Font.GothamBold,
+        Parent = row,
+    })
+    corner(bb, 4)
+    bindBtns[bd.key] = bb
+    bb.MouseButton1Click:Connect(function()
+        cfg.listening = bd.key
+        bb.Text = "..."
+        bb.TextColor3 = C.text
+    end)
+end
+
+scroll.CanvasSize = UDim2.new(0, 0, 0, 380)
+
+-- ========== PILL ==========
+
+local pill = mk("TextButton", {
+    Size = UDim2.new(0, 80, 0, 24),
+    Position = UDim2.new(0.5, -40, 0, 6),
+    BackgroundColor3 = C.bg, BorderSizePixel = 0,
+    Text = "IMKOMOD", TextColor3 = C.dim,
+    TextSize = 10, Font = Enum.Font.GothamBold,
+    Visible = false,
+    Parent = gui,
+})
+corner(pill, 12); stroke(pill)
+
+-- ========== MOBILE ==========
+
+local mobGroup = mk("Frame", {
+    Name = "MobCtrl",
+    Size = UDim2.new(0, 50, 0, 250),
+    Position = UDim2.new(0, 8, 0.5, -125),
+    BackgroundTransparency = 1,
+    Visible = false,
+    Parent = gui,
+})
+
+local mobBtns = {}
+local mobDefs = {
+    {t = "TP",  c = C.accent, y = 0,   h = 38},
+    {t = "FLY", c = C.red,    y = 44,  h = 34},
+    {t = "SPD", c = C.red,    y = 84,  h = 34},
+    {t = "FB",  c = C.red,    y = 124, h = 34},
+    {t = "UP",  c = C.dim,    y = 170, h = 32},
+    {t = "DN",  c = C.dim,    y = 208, h = 32},
+}
+
+for _, d in ipairs(mobDefs) do
+    local b = mk("TextButton", {
+        Size = UDim2.new(1, 0, 0, d.h),
+        Position = UDim2.new(0, 0, 0, d.y),
+        BackgroundColor3 = C.btn, BorderSizePixel = 0,
+        Text = d.t, TextColor3 = d.c,
+        TextSize = d.h > 34 and 12 or 10,
+        Font = Enum.Font.GothamBold,
+        Parent = mobGroup,
+    })
+    corner(b, 8); stroke(b)
+    mobBtns[d.t] = b
+end
+
+-- ===================================
+-- GUI LOGIC
+-- ===================================
+
+local function updateAC()
+    if state.killCount > 0 then
+        acLbl.Text = "killed (" .. state.killCount .. ")"
+        acLbl.TextColor3 = C.green
+    else
+        acLbl.Text = "basic mode"
+        acLbl.TextColor3 = C.orange
+    end
+end
+
+local function toggleStyle(btn, on, mobKey)
+    if on then
+        btn.Text = "ON"; btn.TextColor3 = C.green
+        TweenService:Create(btn, twF, {BackgroundColor3 = C.btnOn}):Play()
+        if mobKey and mobBtns[mobKey] then
+            mobBtns[mobKey].TextColor3 = C.green
+            TweenService:Create(mobBtns[mobKey], twF,
+                {BackgroundColor3 = C.btnOn}):Play()
+        end
+    else
+        btn.Text = "OFF"; btn.TextColor3 = C.red
+        TweenService:Create(btn, twF, {BackgroundColor3 = C.btn}):Play()
+        if mobKey and mobBtns[mobKey] then
+            mobBtns[mobKey].TextColor3 = C.red
+            TweenService:Create(mobBtns[mobKey], twF,
+                {BackgroundColor3 = C.btn}):Play()
+        end
+    end
+end
+
+_G._ImkoWallStatus = function(ok)
+    updateAC()
+    if ok then
+        ncStatus.Text = "Teleported"
+        ncStatus.TextColor3 = C.green
+    else
+        ncStatus.Text = "No wall found"
+        ncStatus.TextColor3 = C.orange
+    end
+    task.delay(1.5, function() ncStatus.Text = "" end)
+end
+
+_G._ImkoFlyUpdate = function(on)
+    updateAC(); toggleStyle(flyBtn, on, "FLY")
+end
+
+_G._ImkoSpeedUpdate = function(on)
+    updateAC(); toggleStyle(spdBtn, on, "SPD")
+end
+
+_G._ImkoBindUpdate = function()
+    for key, btn in pairs(bindBtns) do
+        btn.Text = cfg.binds[key].Name
+        btn.TextColor3 = C.accent
+    end
+    ncBtn.Text = "[" .. cfg.binds.walltp.Name .. "]"
+end
+
+-- PC buttons
+ncBtn.MouseButton1Click:Connect(function()
+    runACKill(); local ok = wallTP()
+    _G._ImkoWallStatus(ok)
+end)
+
+flyBtn.MouseButton1Click:Connect(function()
+    runACKill()
+    cfg.flyActive = not cfg.flyActive
+    if cfg.flyActive then startFly() else stopFly() end
+    _G._ImkoFlyUpdate(cfg.flyActive)
+end)
+
+spdBtn.MouseButton1Click:Connect(function()
+    runACKill()
+    cfg.speedActive = not cfg.speedActive
+    if cfg.speedActive then startSpeed() else stopSpeed() end
+    _G._ImkoSpeedUpdate(cfg.speedActive)
+end)
+
+fbBtn.MouseButton1Click:Connect(function()
+    cfg.fullbrightActive = not cfg.fullbrightActive
+    if cfg.fullbrightActive then startFullbright() else stopFullbright() end
+    toggleStyle(fbBtn, cfg.fullbrightActive, "FB")
+end)
+
+-- Mobile buttons
+mobBtns["TP"].MouseButton1Click:Connect(function()
+    runACKill(); local ok = wallTP()
+    if _G._ImkoWallStatus then _G._ImkoWallStatus(ok) end
+end)
+
+mobBtns["FLY"].MouseButton1Click:Connect(function()
+    runACKill()
+    cfg.flyActive = not cfg.flyActive
+    if cfg.flyActive then startFly() else stopFly() end
+    if _G._ImkoFlyUpdate then _G._ImkoFlyUpdate(cfg.flyActive) end
+end)
+
+mobBtns["SPD"].MouseButton1Click:Connect(function()
+    runACKill()
+    cfg.speedActive = not cfg.speedActive
+    if cfg.speedActive then startSpeed() else stopSpeed() end
+    if _G._ImkoSpeedUpdate then _G._ImkoSpeedUpdate(cfg.speedActive) end
+end)
+
+mobBtns["FB"].MouseButton1Click:Connect(function()
+    cfg.fullbrightActive = not cfg.fullbrightActive
+    if cfg.fullbrightActive then startFullbright() else stopFullbright() end
+    toggleStyle(fbBtn, cfg.fullbrightActive, "FB")
+end)
+
+mobBtns["UP"].MouseButton1Down:Connect(function()
+    state.keys["up"] = true
+end)
+mobBtns["UP"].MouseButton1Up:Connect(function()
+    state.keys["up"] = nil
+end)
+mobBtns["UP"].InputEnded:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.Touch then
+        state.keys["up"] = nil
+    end
+end)
+
+mobBtns["DN"].MouseButton1Down:Connect(function()
+    state.keys["down"] = true
+end)
+mobBtns["DN"].MouseButton1Up:Connect(function()
+    state.keys["down"] = nil
+end)
+mobBtns["DN"].InputEnded:Connect(function(i)
+    if i.UserInputType == Enum.UserInputType.Touch then
+        state.keys["down"] = nil
+    end
+end)
+
+minBtn.MouseButton1Click:Connect(function()
+    mainFrame.Visible = false
+    pill.Visible = true
+end)
+
+pill.MouseButton1Click:Connect(function()
+    mainFrame.Visible = true
+    pill.Visible = false
+end)
+
+local function selectPlatform(p)
+    cfg.platform = p
+
+    for _, ch in ipairs(selFrame:GetDescendants()) do
+        if ch:IsA("TextLabel") or ch:IsA("TextButton") then
+            TweenService:Create(ch, twM, {TextTransparency = 1}):Play()
+            if ch:IsA("TextButton") then
+                TweenService:Create(ch, twM,
+                    {BackgroundTransparency = 1}):Play()
+            end
+        elseif ch:IsA("UIStroke") then
+            TweenService:Create(ch, twM, {Transparency = 1}):Play()
+        end
+    end
+    TweenService:Create(selFrame, twM, {BackgroundTransparency = 1}):Play()
+
+    task.delay(0.25, function()
+        selFrame.Visible = false
+
+        if p == "pc" then
+            mainFrame.Size = UDim2.new(0, 245, 0, pcH)
+            bindSection.Visible = true
+            scroll.CanvasSize = UDim2.new(0, 0, 0, 380)
+        else
+            mainFrame.Size = UDim2.new(0, 245, 0, mobH)
+            bindSection.Visible = false
+            scroll.CanvasSize = UDim2.new(0, 0, 0, 270)
+            mobGroup.Visible = true
+        end
+
+        mainFrame.BackgroundTransparency = 1
+        mainFrame.Visible = true
+        TweenService:Create(mainFrame, twM,
+            {BackgroundTransparency = 0}):Play()
+    end)
+end
+
+pcBtnSel.MouseButton1Click:Connect(function() selectPlatform("pc") end)
+mobBtnSel.MouseButton1Click:Connect(function() selectPlatform("mobile") end)
+
+-- ===================================
+-- CLEANUP
+-- ===================================
+
+_G._ImkoCleanup = function()
+    if cfg.flyActive then stopFly() end
+    if cfg.speedActive then stopSpeed() end
+    if cfg.fullbrightActive then stopFullbright() end
+    for _, c in ipairs(inputConns) do
+        if c then c:Disconnect() end
+    end
+    gui:Destroy()
+    _G._ImkoWallStatus = nil
+    _G._ImkoFlyUpdate = nil
+    _G._ImkoSpeedUpdate = nil
+    _G._ImkoBindUpdate = nil
+    _G._ImkoCleanup = nil
+end
+
+print("[IMKOMOD] Loaded")
+print("[IMKOMOD] Wall TP / Fly / Speed / Fullbright")
