@@ -1,6 +1,6 @@
 --[[
-    Aimbot v3.3
-    Anti-spin fix + close-range stability + shift-lock compatible
+    Aimbot v3.4
+    Long-range boost + close-range anti-spin
     Full compatibility: PC + Mobile, all executors
 ]]
 
@@ -130,9 +130,12 @@ local Config = {
     priority     = 1,
     stickyTarget = nil,
     stickyBreak  = 25,
-    -- [v3.3] ANTI-SPIN
+    -- ANTI-SPIN
     maxTurnDeg   = 15,
     closeRange   = 10,
+    -- [v3.4] LONG RANGE
+    longRange    = 40,
+    longBoost    = 1.8,
 }
 
 local PRIORITIES = {
@@ -177,10 +180,13 @@ local L = {
         priDesc3="Lowest health first",
         priDesc4="Who damaged you recently",
         priDesc5="Lock on first target found",
-        -- [v3.3]
         antiSpin="ANTI-SPIN",
         maxTurn="Max Turn (°/frame)",
         closeRange="Close Damp Range",
+        -- [v3.4]
+        longRangeH="LONG RANGE",
+        longRange="Long Range Start",
+        longBoost="Long Range Boost",
     },
     ru = {
         choose="Выберите версию",pc="ПК",mobile="Телефон",
@@ -202,10 +208,13 @@ local L = {
         priDesc3="Сначала с наименьшим HP",
         priDesc4="Кто недавно нанёс урон",
         priDesc5="Захват первой найденной цели",
-        -- [v3.3]
         antiSpin="АНТИ-СПИН",
         maxTurn="Макс. поворот (°/кадр)",
         closeRange="Зона замедления",
+        -- [v3.4]
+        longRangeH="ДАЛЬНИЙ БОЙ",
+        longRange="Порог дальнего боя",
+        longBoost="Усиление на дистанции",
     },
 }
 local function t(k) return (L[Config.lang] or L.en)[k] or k end
@@ -521,7 +530,7 @@ local function simplePred(char)
 end
 
 ----------------------------------------------------------------
--- ROTATION  [v3.3 ANTI-SPIN REWRITE]
+-- ROTATION  [v3.4 DISTANCE-AWARE]
 ----------------------------------------------------------------
 local function getYP(cf)
     local lv=cf.LookVector
@@ -538,19 +547,35 @@ end
 local function aDiff(a,b) local d=(b-a)%(2*PI); if d>PI then d=d-2*PI end; return d end
 local function lAng(a,b,f) return a+aDiff(a,b)*f end
 
--- [v3.3] helper: compute distance-based damping multiplier
-local function distDamp(aimPos, camPos)
-    local dist = (aimPos - camPos).Magnitude
-    if dist >= Config.closeRange then return 1.0 end
-    local ratio = CLAMP(dist / Config.closeRange, 0, 1)
-    -- smooth curve: keeps ~60% power at half-range, drops to 15% at point-blank
-    return 0.15 + 0.85 * ratio * ratio
+-- [v3.4] FULL DISTANCE SCALE: close=dampen, mid=normal, far=boost
+local function distScale(dist)
+    -- CLOSE RANGE: dampen to prevent spinning
+    if dist < Config.closeRange then
+        local ratio = CLAMP(dist / Config.closeRange, 0, 1)
+        return 0.15 + 0.85 * ratio * ratio
+    end
+    -- LONG RANGE: boost aim factor (target is small on screen, safe to aim faster)
+    if dist > Config.longRange then
+        local extra = CLAMP((dist - Config.longRange) / Config.longRange, 0, 1)
+        return 1.0 + (Config.longBoost - 1.0) * extra
+    end
+    -- MID RANGE: normal
+    return 1.0
 end
 
--- [v3.3] helper: clamp yaw/pitch rotation to maxTurnDeg per frame
-local function clampRotation(oldY, oldP, newY, newP, dt)
-    local maxRad = RAD(Config.maxTurnDeg) * CLAMP(dt * 60, 0.5, 3)
-    local maxPitch = maxRad * 0.6 -- pitch axis more restrictive
+-- [v3.4] DISTANCE-AWARE rotation clamp
+local function clampRotation(oldY, oldP, newY, newP, dt, dist)
+    local baseDeg = Config.maxTurnDeg
+
+    -- [v3.4] at long range, allow more turn per frame
+    -- (angular size of target is tiny, so bigger turn = still small screen motion)
+    if dist and dist > Config.longRange then
+        local turnBoost = 1 + CLAMP((dist - Config.longRange) / 50, 0, 2.5)
+        baseDeg = baseDeg * turnBoost
+    end
+
+    local maxRad = RAD(baseDeg) * CLAMP(dt * 60, 0.5, 3)
+    local maxPitch = maxRad * 0.7
 
     local dy = aDiff(oldY, newY)
     local dp = aDiff(oldP, newP)
@@ -564,27 +589,27 @@ local function clampRotation(oldY, oldP, newY, newP, dt)
     return newY, newP
 end
 
--- [v3.3] REWRITTEN: smoothAim now takes dt, applies distance damping + rotation cap
-local function smoothAim(cur, tgt, fac, dt)
+-- [v3.4] smoothAim with distance-aware scaling
+local function smoothAim(cur, tgt, fac, dt, dist)
     local pos = cur.Position
     local cy, cp = getYP(cur)
     local ty, tp = ypTo(pos, tgt)
 
-    -- distance-based damping
-    local dm = distDamp(tgt, pos)
-    local effectiveFac = fac * dm
+    -- distance-based factor scaling
+    local dm = distScale(dist)
+    local effectiveFac = CLAMP(fac * dm, 0.01, 0.98)
 
     -- interpolate
     local newY = lAng(cy, ty, effectiveFac)
     local newP = lAng(cp, tp, effectiveFac)
 
     -- clamp max rotation per frame
-    newY, newP = clampRotation(cy, cp, newY, newP, dt)
+    newY, newP = clampRotation(cy, cp, newY, newP, dt, dist)
 
     return cfYP(pos, newY, newP)
 end
 
--- [v3.3] REWRITTEN: human-like aim with distance damping + rotation cap
+-- [v3.4] human-like aim with distance-aware everything
 local HA={yO=0,pO=0,yT=0,pT=0,nt=0}
 function HA:tick()
     local now=tick()
@@ -595,24 +620,32 @@ function HA:tick()
     self.yO=self.yO+(self.yT-self.yO)*0.14
     self.pO=self.pO+(self.pT-self.pO)*0.14
 end
-function HA:aim(cur,ap,dt)
+function HA:aim(cur, ap, dt, dist)
     self:tick(); local pos=cur.Position
     local cy,cp=getYP(cur); local ty,tp=ypTo(pos,ap)
-    ty=ty+self.yO; tp=tp+self.pO
-    local td=DEG(ABS(aDiff(cy,ty))+ABS(aDiff(cp,tp)))
-    local curve=0.12+0.88*CLAMP(td/20,0,1)
-    local fac=CLAMP(Config.aimSpeed*curve*dt*60,0.005,0.85)
 
-    -- [v3.3] distance damping
-    local dm = distDamp(ap, pos)
-    fac = fac * dm
+    -- [v3.4] scale jitter DOWN at long range (otherwise jitter > target size)
+    local jitterScale = 1.0
+    if dist > 30 then
+        jitterScale = CLAMP(20 / dist, 0.15, 1.0)
+    end
+    ty = ty + self.yO * jitterScale
+    tp = tp + self.pO * jitterScale
+
+    local td = DEG(ABS(aDiff(cy,ty)) + ABS(aDiff(cp,tp)))
+    local curve = 0.12 + 0.88 * CLAMP(td / 20, 0, 1)
+    local fac = CLAMP(Config.aimSpeed * curve * dt * 60, 0.005, 0.85)
+
+    -- [v3.4] distance-based factor scaling
+    local dm = distScale(dist)
+    fac = CLAMP(fac * dm, 0.005, 0.95)
 
     -- interpolate
     local newY = lAng(cy, ty, fac)
     local newP = lAng(cp, tp, fac)
 
-    -- [v3.3] clamp max rotation
-    newY, newP = clampRotation(cy, cp, newY, newP, dt)
+    -- [v3.4] clamp max rotation
+    newY, newP = clampRotation(cy, cp, newY, newP, dt, dist)
 
     return cfYP(pos, newY, newP)
 end
@@ -686,12 +719,15 @@ local function bestTarget()
 end
 
 ----------------------------------------------------------------
--- GET AIM POS  [v3.3 close-range prediction scaling]
+-- GET AIM POS  [v3.4 distance-aware prediction]
 ----------------------------------------------------------------
 local function getAimPos(plr)
     local c=plr.Character; if not c then return nil end
     local pos = getAimPartPos(c)
     if not pos then return nil end
+
+    local camPos = Camera.CFrame.Position
+    local dist = (pos - camPos).Magnitude
 
     local predOffset = V3(0,0,0)
     if Config.smartPredict then
@@ -700,15 +736,23 @@ local function getAimPos(plr)
         predOffset = simplePred(c)
     end
 
-    -- [v3.3] scale prediction down at close range to prevent overshoot/spin
+    -- [v3.4] DISTANCE-AWARE PREDICTION SCALING
     if predOffset.Magnitude > 0.01 then
-        local camPos = Camera.CFrame.Position
-        local dist = (pos - camPos).Magnitude
+        -- CLOSE RANGE: scale prediction down to prevent overshoot
         if dist < Config.closeRange then
             predOffset = predOffset * CLAMP(dist / Config.closeRange, 0.05, 1.0)
         end
-        -- cap prediction to 40% of distance (prevents aim point behind player)
-        local maxPred = MAX(dist * 0.4, 0.5)
+
+        -- [v3.4] LONG RANGE: boost prediction (more lead needed at distance)
+        if dist > Config.longRange then
+            local rangeBoost = 1 + CLAMP((dist - Config.longRange) / 80, 0, 0.6)
+            predOffset = predOffset * rangeBoost
+        end
+
+        -- cap prediction relative to distance
+        -- close: 40% of dist, far: 60% of dist
+        local capRatio = dist > Config.longRange and 0.6 or 0.4
+        local maxPred = MAX(dist * capRatio, 0.5)
         if predOffset.Magnitude > maxPred then
             predOffset = predOffset.Unit * maxPred
         end
@@ -739,10 +783,10 @@ end
 
 try(function()
     local p=try(function() return gethui() end) or game:GetService("CoreGui")
-    local old=p:FindFirstChild("AimbotV33"); if old then old:Destroy() end
+    local old=p:FindFirstChild("AimbotV34"); if old then old:Destroy() end
 end)
 
-local Gui=Instance.new("ScreenGui"); Gui.Name="AimbotV33"; Gui.ResetOnSpawn=false
+local Gui=Instance.new("ScreenGui"); Gui.Name="AimbotV34"; Gui.ResetOnSpawn=false
 try(function() Gui.ZIndexBehavior=Enum.ZIndexBehavior.Sibling end)
 if Support.syn then try(function() syn.protect_gui(Gui) end) end
 if Support.protect then try(function() protect_gui(Gui) end) end
@@ -1036,7 +1080,7 @@ local function buildSelect()
     mb.MouseButton1Click:Connect(function() Config.platform="mobile"; selScreen:Destroy(); buildMain() end)
     local vr=Instance.new("TextLabel"); vr.BackgroundTransparency=1; vr.Size=UDim2.new(1,0,0,18)
     vr.Position=UDim2.new(0,0,1,-28); vr.Font=Enum.Font.Gotham; vr.TextColor3=Color3.fromRGB(65,65,82)
-    vr.TextSize=10; vr.Text="Aimbot v3.3"; vr.Parent=selScreen
+    vr.TextSize=10; vr.Text="Aimbot v3.4"; vr.Parent=selScreen
 end
 
 ----------------------------------------------------------------
@@ -1133,11 +1177,9 @@ function buildMain()
     uiToggle(sc,t("showFov"),Config.showFov,function(v) Config.showFov=v end,nx())
     uiToggle(sc,t("showCross"),Config.showCross,function(v) Config.showCross=v end,nx())
 
-    -- AIM PART
     uiHeader(sc,t("aimPart"),nx())
     uiAimPart(sc,mob,nx())
 
-    -- PREDICTION
     uiHeader(sc,"PREDICTION",nx())
     uiToggle(sc,t("smartPred"),Config.smartPredict,function(v) Config.smartPredict=v end,nx())
     uiToggle(sc,t("autoPing"),Config.autoPing,function(v) Config.autoPing=v end,nx())
@@ -1145,7 +1187,6 @@ function buildMain()
     uiToggle(sc,t("prediction"),Config.prediction,function(v) Config.prediction=v end,nx())
     uiSlider(sc,t("predValue"),0,0.3,Config.predValue,3,function(v) Config.predValue=v end,nx())
 
-    -- AIM
     uiHeader(sc,"AIM",nx())
     uiToggle(sc,t("humanLike"),Config.humanLike,function(v) Config.humanLike=v end,nx())
     uiSlider(sc,t("aimSpeed"),0.05,1.0,Config.aimSpeed,2,function(v) Config.aimSpeed=v end,nx())
@@ -1171,10 +1212,15 @@ function buildMain()
                 end end) end)
     end
 
-    -- [v3.3] ANTI-SPIN SECTION
+    -- ANTI-SPIN
     uiHeader(sc,t("antiSpin"),nx())
     uiSlider(sc,t("maxTurn"),3,30,Config.maxTurnDeg,0,function(v) Config.maxTurnDeg=v end,nx())
     uiSlider(sc,t("closeRange"),3,25,Config.closeRange,0,function(v) Config.closeRange=v end,nx())
+
+    -- [v3.4] LONG RANGE
+    uiHeader(sc,t("longRangeH"),nx())
+    uiSlider(sc,t("longRange"),15,80,Config.longRange,0,function(v) Config.longRange=v end,nx())
+    uiSlider(sc,t("longBoost"),1.0,3.0,Config.longBoost,1,function(v) Config.longBoost=v end,nx())
 
     uiHeader(sc,t("priority"),nx())
     uiPriority(sc,mob,nx())
@@ -1256,7 +1302,7 @@ table.insert(GC.conn,RunService.Heartbeat:Connect(function()
 end))
 
 ----------------------------------------------------------------
--- RENDER  [v3.3 ANTI-SPIN FIX]
+-- RENDER  [v3.4 DISTANCE-AWARE AIM]
 ----------------------------------------------------------------
 RunService:BindToRenderStep("AimbotV32",Enum.RenderPriority.Camera.Value+1,function(dt)
     Camera=workspace.CurrentCamera
@@ -1276,20 +1322,22 @@ RunService:BindToRenderStep("AimbotV32",Enum.RenderPriority.Camera.Value+1,funct
     if not tgt or not tgt.Character then setCrossVis(false); return end
     local ap=getAimPos(tgt)
     if not ap then setCrossVis(false); return end
-    if (ap-Camera.CFrame.Position).Magnitude<0.5 then setCrossVis(false); return end
+
+    -- [v3.4] compute distance once, pass to aim functions
+    local dist = (ap-Camera.CFrame.Position).Magnitude
+    if dist < 0.5 then setCrossVis(false); return end
 
     if Config.showCross then
         local sp,onS=Camera:WorldToViewportPoint(ap)
         if onS then setCrossVis(true); updateCross(sp.X,sp.Y) else setCrossVis(false) end
     else setCrossVis(false) end
 
-    -- [v3.3] ANTI-SPIN: human-like uses HA:aim with built-in damping
-    -- non-human uses high factor BUT smoothAim now has distance damping + rotation cap
+    -- [v3.4] both paths now receive dist for distance-aware scaling
     if Config.humanLike then
-        Camera.CFrame=HA:aim(Camera.CFrame,ap,dt)
+        Camera.CFrame = HA:aim(Camera.CFrame, ap, dt, dist)
     else
         local baseFac = CLAMP(Config.aimSpeed * 2.5, 0.3, 0.9)
-        Camera.CFrame=smoothAim(Camera.CFrame,ap,baseFac,dt)
+        Camera.CFrame = smoothAim(Camera.CFrame, ap, baseFac, dt, dist)
     end
 end)
 
