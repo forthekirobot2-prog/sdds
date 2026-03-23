@@ -2,7 +2,9 @@
     IMKOMOD GUI - Dandy's World
     Features: Wall TP / Fly / Speed / Fullbright
     Universal - any executor, PC + Mobile
-    v3: Fixed mobile drag + GUI conflict on Delta
+    v4: Zero global UIS listeners for drag/slider
+        gethui() support for Delta
+        InputObject tracking for mobile
 ]]
 
 if _G._ImkoCleanup then
@@ -28,6 +30,8 @@ local compat = {
         and type(getnamecallmethod) == "function",
     hasNC = pcall(function() return newcclosure end)
         and type(newcclosure) == "function",
+    hasGHUI = pcall(function() return gethui end)
+        and type(gethui) == "function",
 }
 
 local function safeWrap(fn)
@@ -93,7 +97,6 @@ local function killACListeners()
     local char = getChar()
     if not char then return 0 end
     local killed = 0
-
     for _, part in ipairs(char:GetDescendants()) do
         if part:IsA("BasePart") then
             for _, prop in ipairs({
@@ -117,7 +120,6 @@ local function killACListeners()
             end)
         end
     end
-
     local hum = getHum()
     if hum then
         for _, prop in ipairs({
@@ -145,7 +147,6 @@ local function killACListeners()
             end
         end)
     end
-
     for _, ev in ipairs({"ChildAdded","DescendantAdded","ChildRemoved"}) do
         pcall(function()
             for _, c in ipairs(getconnections(char[ev])) do
@@ -153,7 +154,6 @@ local function killACListeners()
             end
         end)
     end
-
     return killed
 end
 
@@ -240,21 +240,16 @@ local function wallTP()
     local char = getChar()
     if not hrp or not char then return false end
     if tick() - state.lastTP < cfg.cooldown then return false end
-
     local dir = getMoveDirection()
     if not dir then return false end
-
     local rp = RaycastParams.new()
     rp.FilterDescendantsInstances = {char}
     rp.FilterType = Enum.RaycastFilterType.Exclude
-
     local origin = hrp.Position
     local fwdHit = WS:Raycast(origin, dir * cfg.maxWallThick, rp)
     if not fwdHit then return false end
-
     local backOrigin = origin + dir * cfg.maxWallThick
     local backHit = WS:Raycast(backOrigin, -dir * cfg.maxWallThick, rp)
-
     local target
     if backHit then
         target = backHit.Position + dir * cfg.tpOffset
@@ -263,7 +258,6 @@ local function wallTP()
         target = origin + dir * (dist + 6)
     end
     target = Vector3.new(target.X, origin.Y, target.Z)
-
     local floorHit = WS:Raycast(
         target + Vector3.new(0, 5, 0),
         Vector3.new(0, -50, 0), rp
@@ -271,14 +265,12 @@ local function wallTP()
     if floorHit then
         target = Vector3.new(target.X, floorHit.Position.Y + 3, target.Z)
     end
-
     local _, ry, _ = hrp.CFrame:ToEulerAnglesYXZ()
     hrp.CFrame = CFrame.new(target) * CFrame.Angles(0, ry, 0)
     hrp.Velocity = Vector3.new(0, 0, 0)
     pcall(function()
         hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
     end)
-
     state.lastTP = tick()
     return true
 end
@@ -293,25 +285,20 @@ local function startFly()
     state.origWS = hum.WalkSpeed
     state.origJP = hum.JumpPower
     state.origJH = hum.JumpHeight
-
     state.conns.fly = RunService.Stepped:Connect(function(_, dt)
         local hrp = getHRP()
         local hum2 = getHum()
         local char = getChar()
         if not hrp or not hum2 or not char then return end
-
         for _, p in ipairs(char:GetDescendants()) do
             if p:IsA("BasePart") then p.CanCollide = false end
         end
-
         hum2.WalkSpeed = 0
         hum2.JumpPower = 0
         hum2.JumpHeight = 0
-
         local camCF = camera.CFrame
         local md = hum2.MoveDirection
         local vel = Vector3.new(0,0,0)
-
         if md.Magnitude > 0.1 then
             local cL = camCF.LookVector
             local cR = camCF.RightVector
@@ -319,7 +306,6 @@ local function startFly()
             local rgt = Vector3.new(cR.X,0,cR.Z).Unit
             vel = (fwd * md:Dot(fwd) + rgt * md:Dot(rgt)).Unit * cfg.flySpeed
         end
-
         local vy = 0
         if state.keys[Enum.KeyCode.Space] or state.keys["up"] then
             vy = cfg.flyVSpeed
@@ -328,7 +314,6 @@ local function startFly()
             or state.keys["down"] then
             vy = -cfg.flyVSpeed
         end
-
         local mv = vel * dt
         hrp.CFrame = hrp.CFrame + Vector3.new(mv.X, vy * dt, mv.Z)
         hrp.Velocity = Vector3.new(0,0,0)
@@ -383,22 +368,18 @@ local function startSpeed()
     local hum = getHum()
     if not hum then return end
     state.origWS = hum.WalkSpeed
-
     state.conns.speed = RunService.Stepped:Connect(function(_, dt)
         local hrp = getHRP()
         local hum2 = getHum()
         if not hrp or not hum2 then return end
-
         local target = cfg.speedValue
         if target <= cfg.maxSafeWS then
             hum2.WalkSpeed = target
             return
         end
-
         hum2.WalkSpeed = cfg.maxSafeWS
         local md = hum2.MoveDirection
         if md.Magnitude < 0.1 then return end
-
         local extra = target - cfg.maxSafeWS
         local nudge = md.Unit * extra * dt
         hrp.CFrame = hrp.CFrame + Vector3.new(nudge.X, 0, nudge.Z)
@@ -427,14 +408,12 @@ local function startFullbright()
         Ambient = Lighting.Ambient,
         OutdoorAmbient = Lighting.OutdoorAmbient,
     }
-
     Lighting.Brightness = 2
     Lighting.ClockTime = 14
     Lighting.FogEnd = 100000
     Lighting.GlobalShadows = false
     Lighting.Ambient = Color3.fromRGB(178, 178, 178)
     Lighting.OutdoorAmbient = Color3.fromRGB(178, 178, 178)
-
     state.disabledEffects = {}
     for _, effect in ipairs(Lighting:GetChildren()) do
         if effect:IsA("ColorCorrectionEffect")
@@ -483,21 +462,19 @@ player.CharacterAdded:Connect(function(char)
 end)
 
 -- ===================================
--- INPUT
+-- INPUT (only keyboard - no touch)
 -- ===================================
 
 local inputConns = {}
 
 inputConns[1] = UIS.InputBegan:Connect(function(input, gpe)
     if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
-
     if cfg.listening then
         cfg.binds[cfg.listening] = input.KeyCode
         cfg.listening = nil
         if _G._ImkoBindUpdate then _G._ImkoBindUpdate() end
         return
     end
-
     if cfg.flyActive then
         if input.KeyCode == Enum.KeyCode.Space
             or input.KeyCode == Enum.KeyCode.LeftShift
@@ -505,10 +482,8 @@ inputConns[1] = UIS.InputBegan:Connect(function(input, gpe)
             state.keys[input.KeyCode] = true
         end
     end
-
     if gpe then return end
     state.keys[input.KeyCode] = true
-
     if cfg.platform == "pc" then
         if input.KeyCode == cfg.binds.walltp then
             runACKill()
@@ -539,12 +514,11 @@ inputConns[2] = UIS.InputEnded:Connect(function(input)
 end)
 
 -- ===================================
--- GUI SETUP
+-- GUI SETUP — gethui() for Delta
 -- ===================================
 
 local guiName = "_Imko_" .. tostring(player.UserId)
 
--- Clean previous
 pcall(function()
     local old = game:GetService("CoreGui"):FindFirstChild(guiName)
     if old then old:Destroy() end
@@ -554,15 +528,33 @@ for _, g in ipairs(player.PlayerGui:GetChildren()) do
         g:Destroy()
     end
 end
+if compat.hasGHUI then
+    pcall(function()
+        for _, g in ipairs(gethui():GetChildren()) do
+            if g.Name == guiName or g.Name:find("_Imko") then
+                g:Destroy()
+            end
+        end
+    end)
+end
 
 local gui = Instance.new("ScreenGui")
 gui.Name = guiName
 gui.ResetOnSpawn = false
 gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 
--- FIX: Always use PlayerGui on mobile (Delta compatible)
--- CoreGui on mobile breaks other games' GUI
-gui.Parent = player.PlayerGui
+-- Priority: gethui() > PlayerGui
+-- gethui() is a hidden container that NEVER conflicts with game GUI
+local guiMode = "PlayerGui"
+if compat.hasGHUI then
+    pcall(function()
+        gui.Parent = gethui()
+        guiMode = "gethui"
+    end)
+end
+if not gui.Parent then
+    gui.Parent = player.PlayerGui
+end
 
 local C = {
     bg     = Color3.fromRGB(10, 10, 14),
@@ -611,41 +603,47 @@ local function addHover(btn)
     end)
 end
 
--- PC drag (unchanged)
+-- =============================================
+-- DRAG using InputObject tracking (NO global UIS)
+-- Each touch/click is tracked via input.Changed
+-- This NEVER interferes with game touches
+-- =============================================
+
 local function makeDrag(frame, handle)
     handle = handle or frame
-    local d, ds, sp
-    handle.InputBegan:Connect(function(i)
+    handle.InputBegan:Connect(function(input)
         if state.sliderDragging then return end
-        if i.UserInputType == Enum.UserInputType.MouseButton1
-            or i.UserInputType == Enum.UserInputType.Touch then
-            d = true; ds = i.Position; sp = frame.Position
-            i.Changed:Connect(function()
-                if i.UserInputState == Enum.UserInputState.End then
-                    d = false
-                end
-            end)
+        if input.UserInputType ~= Enum.UserInputType.MouseButton1
+            and input.UserInputType ~= Enum.UserInputType.Touch then
+            return
         end
-    end)
-    UIS.InputChanged:Connect(function(i)
-        if state.sliderDragging then d = false; return end
-        if d and (i.UserInputType == Enum.UserInputType.MouseMovement
-            or i.UserInputType == Enum.UserInputType.Touch) then
-            local delta = i.Position - ds
+
+        local startPos = frame.Position
+        local startInput = input.Position
+
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                return
+            end
+            local delta = input.Position - startInput
             frame.Position = UDim2.new(
-                sp.X.Scale, sp.X.Offset + delta.X,
-                sp.Y.Scale, sp.Y.Offset + delta.Y
+                startPos.X.Scale, startPos.X.Offset + delta.X,
+                startPos.Y.Scale, startPos.Y.Offset + delta.Y
             )
-        end
+        end)
     end)
 end
 
--- SLIDER (unchanged)
+-- =============================================
+-- SLIDER using InputObject tracking (NO global UIS)
+-- =============================================
+
 local function createSlider(parent, pos, minVal, maxVal, default, onChange)
     local frame = mk("Frame", {
         Size = UDim2.new(1, -16, 0, 36),
         Position = pos,
         BackgroundTransparency = 1,
+        Active = false,
         Parent = parent,
     })
 
@@ -672,12 +670,11 @@ local function createSlider(parent, pos, minVal, maxVal, default, onChange)
     })
 
     local track = mk("TextButton", {
-        Size = UDim2.new(1, 0, 0, 8),
-        Position = UDim2.new(0, 0, 0, 22),
+        Size = UDim2.new(1, 0, 0, 14),
+        Position = UDim2.new(0, 0, 0, 20),
         BackgroundColor3 = C.slider,
         BorderSizePixel = 0,
-        Text = "",
-        AutoButtonColor = false,
+        Text = "", AutoButtonColor = false,
         Parent = frame,
     })
     corner(track, 4)
@@ -693,17 +690,16 @@ local function createSlider(parent, pos, minVal, maxVal, default, onChange)
     })
     corner(fill, 4)
 
-    local knob = mk("TextButton", {
-        Size = UDim2.new(0, 16, 0, 16),
-        Position = UDim2.new(initF, -8, 0.5, -8),
+    local knob = mk("Frame", {
+        Size = UDim2.new(0, 18, 0, 18),
+        Position = UDim2.new(initF, -9, 0.5, -9),
         BackgroundColor3 = C.knob,
         BorderSizePixel = 0,
         ZIndex = 5,
-        Text = "",
-        AutoButtonColor = false,
+        Active = false,
         Parent = track,
     })
-    corner(knob, 8)
+    corner(knob, 9)
 
     local safeP = (40 - minVal) / (maxVal - minVal)
     mk("Frame", {
@@ -711,8 +707,7 @@ local function createSlider(parent, pos, minVal, maxVal, default, onChange)
         Position = UDim2.new(safeP, -1, 0, -3),
         BackgroundColor3 = C.red,
         BorderSizePixel = 0,
-        ZIndex = 4,
-        Active = false,
+        ZIndex = 4, Active = false,
         Parent = track,
     })
 
@@ -723,7 +718,7 @@ local function createSlider(parent, pos, minVal, maxVal, default, onChange)
         local val = math.floor(lerp(minVal, maxVal, rel))
 
         fill.Size = UDim2.new(rel, 0, 1, 0)
-        knob.Position = UDim2.new(rel, -8, 0.5, -8)
+        knob.Position = UDim2.new(rel, -9, 0.5, -9)
         valLabel.Text = tostring(val)
 
         if val <= 40 then
@@ -743,35 +738,23 @@ local function createSlider(parent, pos, minVal, maxVal, default, onChange)
         if onChange then onChange(val) end
     end
 
-    track.InputBegan:Connect(function(i)
-        if i.UserInputType == Enum.UserInputType.MouseButton1
-            or i.UserInputType == Enum.UserInputType.Touch then
-            state.sliderDragging = true
-            updateS(i.Position)
+    -- Track InputObject, NOT global UIS
+    track.InputBegan:Connect(function(input)
+        if input.UserInputType ~= Enum.UserInputType.MouseButton1
+            and input.UserInputType ~= Enum.UserInputType.Touch then
+            return
         end
-    end)
 
-    knob.InputBegan:Connect(function(i)
-        if i.UserInputType == Enum.UserInputType.MouseButton1
-            or i.UserInputType == Enum.UserInputType.Touch then
-            state.sliderDragging = true
-        end
-    end)
+        state.sliderDragging = true
+        updateS(input.Position)
 
-    UIS.InputChanged:Connect(function(i)
-        if state.sliderDragging and (
-            i.UserInputType == Enum.UserInputType.MouseMovement
-            or i.UserInputType == Enum.UserInputType.Touch
-        ) then
-            updateS(i.Position)
-        end
-    end)
-
-    UIS.InputEnded:Connect(function(i)
-        if i.UserInputType == Enum.UserInputType.MouseButton1
-            or i.UserInputType == Enum.UserInputType.Touch then
-            state.sliderDragging = false
-        end
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                state.sliderDragging = false
+                return
+            end
+            updateS(input.Position)
+        end)
     end)
 
     return frame
@@ -815,8 +798,7 @@ mk("Frame", {
     Size = UDim2.new(1, -16, 0, 1),
     Position = UDim2.new(0, 8, 0, 58),
     BackgroundColor3 = C.border, BorderSizePixel = 0,
-    Active = false,
-    Parent = selFrame,
+    Active = false, Parent = selFrame,
 })
 
 local pcBtnSel = mk("TextButton", {
@@ -870,8 +852,7 @@ mk("TextLabel", {
     Text = "IMKOMOD", TextColor3 = C.text,
     TextSize = 15, Font = Enum.Font.GothamBold,
     TextXAlignment = Enum.TextXAlignment.Left,
-    ZIndex = 10,
-    Parent = titleBar,
+    ZIndex = 10, Parent = titleBar,
 })
 
 local minBtn = mk("TextButton", {
@@ -880,8 +861,7 @@ local minBtn = mk("TextButton", {
     BackgroundColor3 = C.btn, BorderSizePixel = 0,
     Text = "-", TextColor3 = C.dim,
     TextSize = 15, Font = Enum.Font.GothamBold,
-    ZIndex = 10,
-    Parent = titleBar,
+    ZIndex = 10, Parent = titleBar,
 })
 corner(minBtn, 6); addHover(minBtn)
 
@@ -889,8 +869,7 @@ mk("Frame", {
     Size = UDim2.new(1, -16, 0, 1),
     Position = UDim2.new(0, 8, 1, -1),
     BackgroundColor3 = C.border, BorderSizePixel = 0,
-    ZIndex = 10, Active = false,
-    Parent = titleBar,
+    ZIndex = 10, Active = false, Parent = titleBar,
 })
 
 local scroll = mk("ScrollingFrame", {
@@ -909,8 +888,7 @@ local function makeRow(yPos, label, btnText, btnColor)
         Size = UDim2.new(1, -16, 0, 28),
         Position = UDim2.new(0, 8, 0, yPos),
         BackgroundTransparency = 1,
-        Active = false,
-        Parent = scroll,
+        Active = false, Parent = scroll,
     })
     mk("TextLabel", {
         Size = UDim2.new(0.6, 0, 1, 0),
@@ -950,12 +928,10 @@ local function makeSep(yPos)
         Size = UDim2.new(1, -16, 0, 1),
         Position = UDim2.new(0, 8, 0, yPos),
         BackgroundColor3 = C.border, BorderSizePixel = 0,
-        Active = false,
-        Parent = scroll,
+        Active = false, Parent = scroll,
     })
 end
 
--- AC Status
 local acRow = mk("Frame", {
     Size = UDim2.new(1, -16, 0, 18),
     Position = UDim2.new(0, 8, 0, 4),
@@ -981,33 +957,26 @@ local acLbl = mk("TextLabel", {
 })
 
 makeSep(28)
-
 local ncBtn = makeRow(36, "Wall TP", "[V]", C.accent)
 local ncStatus = makeLabel(66, "")
-
 local flyBtn = makeRow(82, "Fly", "OFF", C.red)
 makeLabel(112, "Space up / Shift down / WASD move")
-
 local spdBtn = makeRow(130, "Speed", "OFF", C.red)
 createSlider(scroll, UDim2.new(0, 8, 0, 160), 1, 400, 65,
     function(val) cfg.speedValue = val end
 )
-makeLabel(198, "WS 38 + CFrame nudge bypass")
-
-makeSep(216)
-
-local fbBtn = makeRow(224, "Fullbright", "OFF", C.red)
-makeLabel(254, "Removes darkness and effects")
-
-makeSep(272)
+makeLabel(200, "WS 38 + CFrame nudge bypass")
+makeSep(218)
+local fbBtn = makeRow(226, "Fullbright", "OFF", C.red)
+makeLabel(256, "Removes darkness and effects")
+makeSep(274)
 
 local bindSection = mk("Frame", {
     Name = "Binds",
     Size = UDim2.new(1, -16, 0, 90),
-    Position = UDim2.new(0, 8, 0, 280),
+    Position = UDim2.new(0, 8, 0, 282),
     BackgroundTransparency = 1,
-    Active = false,
-    Parent = scroll,
+    Active = false, Parent = scroll,
 })
 
 local bindData = {
@@ -1015,7 +984,6 @@ local bindData = {
     {name = "Fly", key = "fly", y = 26},
     {name = "Speed", key = "speed", y = 52},
 }
-
 local bindBtns = {}
 
 for _, bd in ipairs(bindData) do
@@ -1023,8 +991,7 @@ for _, bd in ipairs(bindData) do
         Size = UDim2.new(1, 0, 0, 22),
         Position = UDim2.new(0, 0, 0, bd.y),
         BackgroundTransparency = 1,
-        Active = false,
-        Parent = bindSection,
+        Active = false, Parent = bindSection,
     })
     mk("TextLabel", {
         Size = UDim2.new(0.6, 0, 1, 0),
@@ -1047,14 +1014,11 @@ for _, bd in ipairs(bindData) do
     bindBtns[bd.key] = bb
     bb.MouseButton1Click:Connect(function()
         cfg.listening = bd.key
-        bb.Text = "..."
-        bb.TextColor3 = C.text
+        bb.Text = "..."; bb.TextColor3 = C.text
     end)
 end
 
-scroll.CanvasSize = UDim2.new(0, 0, 0, 380)
-
--- ========== PILL ==========
+scroll.CanvasSize = UDim2.new(0, 0, 0, 385)
 
 local pill = mk("TextButton", {
     Size = UDim2.new(0, 80, 0, 24),
@@ -1062,16 +1026,14 @@ local pill = mk("TextButton", {
     BackgroundColor3 = C.bg, BorderSizePixel = 0,
     Text = "IMKOMOD", TextColor3 = C.dim,
     TextSize = 10, Font = Enum.Font.GothamBold,
-    Visible = false,
-    Parent = gui,
+    Visible = false, Parent = gui,
 })
 corner(pill, 12); stroke(pill)
 
 -- =============================================
--- MOBILE BUTTONS (FIXED: draggable + no conflict)
+-- MOBILE BUTTONS — InputObject drag, no global UIS
 -- =============================================
 
--- Container: Active = false so it doesn't eat game touches
 local mobGroup = mk("Frame", {
     Name = "MobCtrl",
     Size = UDim2.new(0, 54, 0, 280),
@@ -1082,9 +1044,9 @@ local mobGroup = mk("Frame", {
     Parent = gui,
 })
 
--- Drag handle: TextButton so touch actually works on mobile
+-- Drag handle — TextButton for touch input
 local mobHandle = mk("TextButton", {
-    Size = UDim2.new(1, 0, 0, 22),
+    Size = UDim2.new(1, 0, 0, 24),
     Position = UDim2.new(0, 0, 0, 0),
     BackgroundColor3 = C.border,
     BorderSizePixel = 0,
@@ -1097,91 +1059,46 @@ local mobHandle = mk("TextButton", {
 })
 corner(mobHandle, 6)
 
--- Mobile drag system using touch tracking
-do
-    local dragging = false
-    local dragStart = nil
-    local startPos = nil
-    local totalMoved = 0
+-- Drag via InputObject tracking
+mobHandle.InputBegan:Connect(function(input)
+    if input.UserInputType ~= Enum.UserInputType.Touch
+        and input.UserInputType ~= Enum.UserInputType.MouseButton1 then
+        return
+    end
 
-    mobHandle.MouseButton1Down:Connect(function()
-        dragging = true
-        totalMoved = 0
-        startPos = mobGroup.Position
-        state.mobDragging = false
-    end)
+    local startPos = mobGroup.Position
+    local startInput = input.Position
+    state.mobDragging = false
+    local moved = false
 
-    mobHandle.MouseButton1Up:Connect(function()
-        dragging = false
-        task.delay(0.1, function()
-            state.mobDragging = false
-        end)
-    end)
-
-    mobHandle.InputBegan:Connect(function(i)
-        if i.UserInputType == Enum.UserInputType.Touch then
-            dragging = true
-            dragStart = i.Position
-            startPos = mobGroup.Position
-            totalMoved = 0
-            state.mobDragging = false
-
-            i.Changed:Connect(function()
-                if i.UserInputState == Enum.UserInputState.End then
-                    dragging = false
-                    task.delay(0.1, function()
-                        state.mobDragging = false
-                    end)
-                end
-            end)
-        end
-    end)
-
-    UIS.InputChanged:Connect(function(i)
-        if not dragging then return end
-        if i.UserInputType ~= Enum.UserInputType.Touch
-            and i.UserInputType ~= Enum.UserInputType.MouseMovement then
-            return
-        end
-
-        if not dragStart then
-            dragStart = i.Position
-            startPos = mobGroup.Position
-        end
-
-        local delta = i.Position - dragStart
-        totalMoved = totalMoved + delta.Magnitude * 0.01
-
-        if totalMoved > 5 then
-            state.mobDragging = true
-            mobGroup.Position = UDim2.new(
-                startPos.X.Scale,
-                startPos.X.Offset + delta.X,
-                startPos.Y.Scale,
-                startPos.Y.Offset + delta.Y
-            )
-        end
-    end)
-
-    UIS.InputEnded:Connect(function(i)
-        if i.UserInputType == Enum.UserInputType.Touch then
-            dragging = false
+    input.Changed:Connect(function()
+        if input.UserInputState == Enum.UserInputState.End then
             task.delay(0.1, function()
                 state.mobDragging = false
             end)
+            return
+        end
+
+        local delta = input.Position - startInput
+        if delta.Magnitude > 8 then
+            moved = true
+            state.mobDragging = true
+            mobGroup.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + delta.X,
+                startPos.Y.Scale, startPos.Y.Offset + delta.Y
+            )
         end
     end)
-end
+end)
 
--- Mobile buttons
 local mobBtns = {}
 local mobDefs = {
-    {t = "TP",  c = C.accent, y = 28,  h = 38},
-    {t = "FLY", c = C.red,    y = 70,  h = 34},
-    {t = "SPD", c = C.red,    y = 108, h = 34},
-    {t = "FB",  c = C.red,    y = 146, h = 34},
-    {t = "UP",  c = C.dim,    y = 196, h = 32},
-    {t = "DN",  c = C.dim,    y = 232, h = 32},
+    {t = "TP",  c = C.accent, y = 30,  h = 38},
+    {t = "FLY", c = C.red,    y = 72,  h = 34},
+    {t = "SPD", c = C.red,    y = 110, h = 34},
+    {t = "FB",  c = C.red,    y = 148, h = 34},
+    {t = "UP",  c = C.dim,    y = 198, h = 32},
+    {t = "DN",  c = C.dim,    y = 234, h = 32},
 }
 
 for _, d in ipairs(mobDefs) do
@@ -1261,7 +1178,6 @@ _G._ImkoBindUpdate = function()
     ncBtn.Text = "[" .. cfg.binds.walltp.Name .. "]"
 end
 
--- PC clicks
 ncBtn.MouseButton1Click:Connect(function()
     runACKill(); local ok = wallTP()
     _G._ImkoWallStatus(ok)
@@ -1287,7 +1203,6 @@ fbBtn.MouseButton1Click:Connect(function()
     toggleStyle(fbBtn, cfg.fullbrightActive, "FB")
 end)
 
--- Mobile clicks: ignore if dragging
 mobBtns["TP"].MouseButton1Click:Connect(function()
     if state.mobDragging then return end
     runACKill(); local ok = wallTP()
@@ -1324,11 +1239,6 @@ end)
 mobBtns["UP"].MouseButton1Up:Connect(function()
     state.keys["up"] = nil
 end)
-mobBtns["UP"].InputEnded:Connect(function(i)
-    if i.UserInputType == Enum.UserInputType.Touch then
-        state.keys["up"] = nil
-    end
-end)
 
 mobBtns["DN"].MouseButton1Down:Connect(function()
     if state.mobDragging then return end
@@ -1336,11 +1246,6 @@ mobBtns["DN"].MouseButton1Down:Connect(function()
 end)
 mobBtns["DN"].MouseButton1Up:Connect(function()
     state.keys["down"] = nil
-end)
-mobBtns["DN"].InputEnded:Connect(function(i)
-    if i.UserInputType == Enum.UserInputType.Touch then
-        state.keys["down"] = nil
-    end
 end)
 
 minBtn.MouseButton1Click:Connect(function()
@@ -1355,7 +1260,6 @@ end)
 
 local function selectPlatform(p)
     cfg.platform = p
-
     for _, ch in ipairs(selFrame:GetDescendants()) do
         if ch:IsA("TextLabel") or ch:IsA("TextButton") then
             TweenService:Create(ch, twM, {TextTransparency = 1}):Play()
@@ -1368,21 +1272,18 @@ local function selectPlatform(p)
         end
     end
     TweenService:Create(selFrame, twM, {BackgroundTransparency = 1}):Play()
-
     task.delay(0.25, function()
         selFrame.Visible = false
-
         if p == "pc" then
             mainFrame.Size = UDim2.new(0, 245, 0, pcH)
             bindSection.Visible = true
-            scroll.CanvasSize = UDim2.new(0, 0, 0, 380)
+            scroll.CanvasSize = UDim2.new(0, 0, 0, 385)
         else
             mainFrame.Size = UDim2.new(0, 245, 0, mobH)
             bindSection.Visible = false
             scroll.CanvasSize = UDim2.new(0, 0, 0, 270)
             mobGroup.Visible = true
         end
-
         mainFrame.BackgroundTransparency = 1
         mainFrame.Visible = true
         TweenService:Create(mainFrame, twM,
@@ -1392,10 +1293,6 @@ end
 
 pcBtnSel.MouseButton1Click:Connect(function() selectPlatform("pc") end)
 mobBtnSel.MouseButton1Click:Connect(function() selectPlatform("mobile") end)
-
--- ===================================
--- CLEANUP
--- ===================================
 
 _G._ImkoCleanup = function()
     if cfg.flyActive then stopFly() end
@@ -1412,5 +1309,6 @@ _G._ImkoCleanup = function()
     _G._ImkoCleanup = nil
 end
 
-print("[IMKOMOD] Loaded - PlayerGui mode")
-print("[IMKOMOD] Wall TP / Fly / Speed / Fullbright")
+print("[IMKOMOD] v4 loaded - " .. guiMode)
+print("[IMKOMOD] gethui: " .. (compat.hasGHUI and "yes" or "no"))
+print("[IMKOMOD] Zero global UIS touch listeners")
