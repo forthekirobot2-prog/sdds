@@ -2,7 +2,7 @@
     IMKOMOD GUI - Dandy's World
     Features: Wall TP / Fly / Speed / Fullbright
     Universal - any executor, PC + Mobile
-    Fixed: Draggable mobile buttons, no GUI conflicts
+    v3: Fixed mobile drag + GUI conflict on Delta
 ]]
 
 if _G._ImkoCleanup then
@@ -539,48 +539,30 @@ inputConns[2] = UIS.InputEnded:Connect(function(input)
 end)
 
 -- ===================================
--- GUI SETUP (safe for all executors)
+-- GUI SETUP
 -- ===================================
 
--- Clean up any previous instances everywhere
-local guiName = "_Imko_" .. player.UserId
+local guiName = "_Imko_" .. tostring(player.UserId)
 
+-- Clean previous
 pcall(function()
     local old = game:GetService("CoreGui"):FindFirstChild(guiName)
     if old then old:Destroy() end
 end)
-pcall(function()
-    local old = player.PlayerGui:FindFirstChild(guiName)
-    if old then old:Destroy() end
-end)
+for _, g in ipairs(player.PlayerGui:GetChildren()) do
+    if g.Name == guiName or g.Name:find("_Imko") then
+        g:Destroy()
+    end
+end
 
 local gui = Instance.new("ScreenGui")
 gui.Name = guiName
 gui.ResetOnSpawn = false
 gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-gui.DisplayOrder = 999999
 
--- FIX: don't use CoreGui on mobile/Delta — breaks other game GUIs
--- Use protected PlayerGui placement instead
-local usedCoreGui = false
-if not UIS.TouchEnabled then
-    -- PC: try CoreGui first
-    pcall(function()
-        gui.Parent = game:GetService("CoreGui")
-        usedCoreGui = true
-    end)
-end
-
-if not usedCoreGui then
-    -- Mobile / Delta / fallback: PlayerGui with protection
-    gui.Parent = player.PlayerGui
-
-    -- Protect from game scripts destroying our GUI
-    pcall(function()
-        local mt = getrawmetatable(gui)
-        if mt then setreadonly(mt, false) end
-    end)
-end
+-- FIX: Always use PlayerGui on mobile (Delta compatible)
+-- CoreGui on mobile breaks other games' GUI
+gui.Parent = player.PlayerGui
 
 local C = {
     bg     = Color3.fromRGB(10, 10, 14),
@@ -629,6 +611,7 @@ local function addHover(btn)
     end)
 end
 
+-- PC drag (unchanged)
 local function makeDrag(frame, handle)
     handle = handle or frame
     local d, ds, sp
@@ -657,49 +640,7 @@ local function makeDrag(frame, handle)
     end)
 end
 
--- MOBILE DRAG: separate system for button group
--- Distinguishes tap (< 8px movement) from drag
-local function makeMobDrag(frame, handle)
-    local d, ds, sp, totalMove
-
-    handle.InputBegan:Connect(function(i)
-        if i.UserInputType == Enum.UserInputType.Touch
-            or i.UserInputType == Enum.UserInputType.MouseButton1 then
-            d = true
-            ds = i.Position
-            sp = frame.Position
-            totalMove = 0
-            state.mobDragging = false
-
-            i.Changed:Connect(function()
-                if i.UserInputState == Enum.UserInputState.End then
-                    d = false
-                    task.delay(0.05, function()
-                        state.mobDragging = false
-                    end)
-                end
-            end)
-        end
-    end)
-
-    UIS.InputChanged:Connect(function(i)
-        if d and (i.UserInputType == Enum.UserInputType.Touch
-            or i.UserInputType == Enum.UserInputType.MouseMovement) then
-            local delta = i.Position - ds
-            totalMove = totalMove + delta.Magnitude
-
-            -- Only drag if moved more than 8 pixels
-            if totalMove > 8 then
-                state.mobDragging = true
-                frame.Position = UDim2.new(
-                    sp.X.Scale, sp.X.Offset + delta.X,
-                    sp.Y.Scale, sp.Y.Offset + delta.Y
-                )
-            end
-        end
-    end)
-end
-
+-- SLIDER (unchanged)
 local function createSlider(parent, pos, minVal, maxVal, default, onChange)
     local frame = mk("Frame", {
         Size = UDim2.new(1, -16, 0, 36),
@@ -730,11 +671,13 @@ local function createSlider(parent, pos, minVal, maxVal, default, onChange)
         Parent = frame,
     })
 
-    local track = mk("Frame", {
+    local track = mk("TextButton", {
         Size = UDim2.new(1, 0, 0, 8),
         Position = UDim2.new(0, 0, 0, 22),
         BackgroundColor3 = C.slider,
         BorderSizePixel = 0,
+        Text = "",
+        AutoButtonColor = false,
         Parent = frame,
     })
     corner(track, 4)
@@ -745,16 +688,19 @@ local function createSlider(parent, pos, minVal, maxVal, default, onChange)
         Size = UDim2.new(initF, 0, 1, 0),
         BackgroundColor3 = C.sFill,
         BorderSizePixel = 0,
+        Active = false,
         Parent = track,
     })
     corner(fill, 4)
 
-    local knob = mk("Frame", {
+    local knob = mk("TextButton", {
         Size = UDim2.new(0, 16, 0, 16),
         Position = UDim2.new(initF, -8, 0.5, -8),
         BackgroundColor3 = C.knob,
         BorderSizePixel = 0,
         ZIndex = 5,
+        Text = "",
+        AutoButtonColor = false,
         Parent = track,
     })
     corner(knob, 8)
@@ -766,6 +712,7 @@ local function createSlider(parent, pos, minVal, maxVal, default, onChange)
         BackgroundColor3 = C.red,
         BorderSizePixel = 0,
         ZIndex = 4,
+        Active = false,
         Parent = track,
     })
 
@@ -837,6 +784,7 @@ local selFrame = mk("Frame", {
     Position = UDim2.new(0.5, -110, 0.5, -82),
     BackgroundColor3 = C.bg,
     BorderSizePixel = 0,
+    Active = false,
     Parent = gui,
 })
 corner(selFrame, 8); stroke(selFrame); makeDrag(selFrame)
@@ -867,6 +815,7 @@ mk("Frame", {
     Size = UDim2.new(1, -16, 0, 1),
     Position = UDim2.new(0, 8, 0, 58),
     BackgroundColor3 = C.border, BorderSizePixel = 0,
+    Active = false,
     Parent = selFrame,
 })
 
@@ -902,6 +851,7 @@ local mainFrame = mk("Frame", {
     BorderSizePixel = 0,
     Visible = false,
     ClipsDescendants = true,
+    Active = false,
     Parent = gui,
 })
 corner(mainFrame, 8); stroke(mainFrame); makeDrag(mainFrame)
@@ -909,7 +859,7 @@ corner(mainFrame, 8); stroke(mainFrame); makeDrag(mainFrame)
 local titleBar = mk("Frame", {
     Size = UDim2.new(1, 0, 0, 40),
     BackgroundColor3 = C.bg, BorderSizePixel = 0,
-    ZIndex = 10,
+    ZIndex = 10, Active = false,
     Parent = mainFrame,
 })
 
@@ -939,7 +889,7 @@ mk("Frame", {
     Size = UDim2.new(1, -16, 0, 1),
     Position = UDim2.new(0, 8, 1, -1),
     BackgroundColor3 = C.border, BorderSizePixel = 0,
-    ZIndex = 10,
+    ZIndex = 10, Active = false,
     Parent = titleBar,
 })
 
@@ -959,6 +909,7 @@ local function makeRow(yPos, label, btnText, btnColor)
         Size = UDim2.new(1, -16, 0, 28),
         Position = UDim2.new(0, 8, 0, yPos),
         BackgroundTransparency = 1,
+        Active = false,
         Parent = scroll,
     })
     mk("TextLabel", {
@@ -999,6 +950,7 @@ local function makeSep(yPos)
         Size = UDim2.new(1, -16, 0, 1),
         Position = UDim2.new(0, 8, 0, yPos),
         BackgroundColor3 = C.border, BorderSizePixel = 0,
+        Active = false,
         Parent = scroll,
     })
 end
@@ -1007,7 +959,7 @@ end
 local acRow = mk("Frame", {
     Size = UDim2.new(1, -16, 0, 18),
     Position = UDim2.new(0, 8, 0, 4),
-    BackgroundTransparency = 1,
+    BackgroundTransparency = 1, Active = false,
     Parent = scroll,
 })
 mk("TextLabel", {
@@ -1054,6 +1006,7 @@ local bindSection = mk("Frame", {
     Size = UDim2.new(1, -16, 0, 90),
     Position = UDim2.new(0, 8, 0, 280),
     BackgroundTransparency = 1,
+    Active = false,
     Parent = scroll,
 })
 
@@ -1070,6 +1023,7 @@ for _, bd in ipairs(bindData) do
         Size = UDim2.new(1, 0, 0, 22),
         Position = UDim2.new(0, 0, 0, bd.y),
         BackgroundTransparency = 1,
+        Active = false,
         Parent = bindSection,
     })
     mk("TextLabel", {
@@ -1113,46 +1067,121 @@ local pill = mk("TextButton", {
 })
 corner(pill, 12); stroke(pill)
 
--- ========== MOBILE BUTTONS (draggable) ==========
+-- =============================================
+-- MOBILE BUTTONS (FIXED: draggable + no conflict)
+-- =============================================
 
+-- Container: Active = false so it doesn't eat game touches
 local mobGroup = mk("Frame", {
     Name = "MobCtrl",
-    Size = UDim2.new(0, 52, 0, 258),
-    Position = UDim2.new(0, 8, 0.5, -129),
+    Size = UDim2.new(0, 54, 0, 280),
+    Position = UDim2.new(0, 8, 0.5, -140),
     BackgroundTransparency = 1,
     Visible = false,
+    Active = false,
     Parent = gui,
 })
 
--- Drag handle at top of mobile group
-local mobHandle = mk("Frame", {
-    Size = UDim2.new(1, 0, 0, 18),
+-- Drag handle: TextButton so touch actually works on mobile
+local mobHandle = mk("TextButton", {
+    Size = UDim2.new(1, 0, 0, 22),
     Position = UDim2.new(0, 0, 0, 0),
     BackgroundColor3 = C.border,
     BorderSizePixel = 0,
-    Parent = mobGroup,
-})
-corner(mobHandle, 4)
-
-mk("TextLabel", {
-    Size = UDim2.new(1, 0, 1, 0),
-    BackgroundTransparency = 1,
     Text = "= = =",
     TextColor3 = C.dim,
-    TextSize = 8, Font = Enum.Font.GothamBold,
-    Parent = mobHandle,
+    TextSize = 9,
+    Font = Enum.Font.GothamBold,
+    AutoButtonColor = false,
+    Parent = mobGroup,
 })
+corner(mobHandle, 6)
 
-makeMobDrag(mobGroup, mobHandle)
+-- Mobile drag system using touch tracking
+do
+    local dragging = false
+    local dragStart = nil
+    local startPos = nil
+    local totalMoved = 0
 
+    mobHandle.MouseButton1Down:Connect(function()
+        dragging = true
+        totalMoved = 0
+        startPos = mobGroup.Position
+        state.mobDragging = false
+    end)
+
+    mobHandle.MouseButton1Up:Connect(function()
+        dragging = false
+        task.delay(0.1, function()
+            state.mobDragging = false
+        end)
+    end)
+
+    mobHandle.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = i.Position
+            startPos = mobGroup.Position
+            totalMoved = 0
+            state.mobDragging = false
+
+            i.Changed:Connect(function()
+                if i.UserInputState == Enum.UserInputState.End then
+                    dragging = false
+                    task.delay(0.1, function()
+                        state.mobDragging = false
+                    end)
+                end
+            end)
+        end
+    end)
+
+    UIS.InputChanged:Connect(function(i)
+        if not dragging then return end
+        if i.UserInputType ~= Enum.UserInputType.Touch
+            and i.UserInputType ~= Enum.UserInputType.MouseMovement then
+            return
+        end
+
+        if not dragStart then
+            dragStart = i.Position
+            startPos = mobGroup.Position
+        end
+
+        local delta = i.Position - dragStart
+        totalMoved = totalMoved + delta.Magnitude * 0.01
+
+        if totalMoved > 5 then
+            state.mobDragging = true
+            mobGroup.Position = UDim2.new(
+                startPos.X.Scale,
+                startPos.X.Offset + delta.X,
+                startPos.Y.Scale,
+                startPos.Y.Offset + delta.Y
+            )
+        end
+    end)
+
+    UIS.InputEnded:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.Touch then
+            dragging = false
+            task.delay(0.1, function()
+                state.mobDragging = false
+            end)
+        end
+    end)
+end
+
+-- Mobile buttons
 local mobBtns = {}
 local mobDefs = {
-    {t = "TP",  c = C.accent, y = 24,  h = 38},
-    {t = "FLY", c = C.red,    y = 66,  h = 34},
-    {t = "SPD", c = C.red,    y = 104, h = 34},
-    {t = "FB",  c = C.red,    y = 142, h = 34},
-    {t = "UP",  c = C.dim,    y = 188, h = 30},
-    {t = "DN",  c = C.dim,    y = 222, h = 30},
+    {t = "TP",  c = C.accent, y = 28,  h = 38},
+    {t = "FLY", c = C.red,    y = 70,  h = 34},
+    {t = "SPD", c = C.red,    y = 108, h = 34},
+    {t = "FB",  c = C.red,    y = 146, h = 34},
+    {t = "UP",  c = C.dim,    y = 196, h = 32},
+    {t = "DN",  c = C.dim,    y = 232, h = 32},
 }
 
 for _, d in ipairs(mobDefs) do
@@ -1163,6 +1192,7 @@ for _, d in ipairs(mobDefs) do
         Text = d.t, TextColor3 = d.c,
         TextSize = d.h > 34 and 12 or 10,
         Font = Enum.Font.GothamBold,
+        AutoButtonColor = false,
         Parent = mobGroup,
     })
     corner(b, 8); stroke(b)
@@ -1231,7 +1261,7 @@ _G._ImkoBindUpdate = function()
     ncBtn.Text = "[" .. cfg.binds.walltp.Name .. "]"
 end
 
--- PC buttons
+-- PC clicks
 ncBtn.MouseButton1Click:Connect(function()
     runACKill(); local ok = wallTP()
     _G._ImkoWallStatus(ok)
@@ -1257,38 +1287,35 @@ fbBtn.MouseButton1Click:Connect(function()
     toggleStyle(fbBtn, cfg.fullbrightActive, "FB")
 end)
 
--- Mobile buttons: ignore tap if was dragging
-local function mobClick(fn)
-    return function()
-        if state.mobDragging then return end
-        fn()
-    end
-end
-
-mobBtns["TP"].MouseButton1Click:Connect(mobClick(function()
+-- Mobile clicks: ignore if dragging
+mobBtns["TP"].MouseButton1Click:Connect(function()
+    if state.mobDragging then return end
     runACKill(); local ok = wallTP()
     if _G._ImkoWallStatus then _G._ImkoWallStatus(ok) end
-end))
+end)
 
-mobBtns["FLY"].MouseButton1Click:Connect(mobClick(function()
+mobBtns["FLY"].MouseButton1Click:Connect(function()
+    if state.mobDragging then return end
     runACKill()
     cfg.flyActive = not cfg.flyActive
     if cfg.flyActive then startFly() else stopFly() end
     if _G._ImkoFlyUpdate then _G._ImkoFlyUpdate(cfg.flyActive) end
-end))
+end)
 
-mobBtns["SPD"].MouseButton1Click:Connect(mobClick(function()
+mobBtns["SPD"].MouseButton1Click:Connect(function()
+    if state.mobDragging then return end
     runACKill()
     cfg.speedActive = not cfg.speedActive
     if cfg.speedActive then startSpeed() else stopSpeed() end
     if _G._ImkoSpeedUpdate then _G._ImkoSpeedUpdate(cfg.speedActive) end
-end))
+end)
 
-mobBtns["FB"].MouseButton1Click:Connect(mobClick(function()
+mobBtns["FB"].MouseButton1Click:Connect(function()
+    if state.mobDragging then return end
     cfg.fullbrightActive = not cfg.fullbrightActive
     if cfg.fullbrightActive then startFullbright() else stopFullbright() end
     toggleStyle(fbBtn, cfg.fullbrightActive, "FB")
-end))
+end)
 
 mobBtns["UP"].MouseButton1Down:Connect(function()
     if state.mobDragging then return end
@@ -1385,6 +1412,5 @@ _G._ImkoCleanup = function()
     _G._ImkoCleanup = nil
 end
 
-print("[IMKOMOD] Loaded")
-print("[IMKOMOD] GUI: " .. (usedCoreGui and "CoreGui" or "PlayerGui"))
+print("[IMKOMOD] Loaded - PlayerGui mode")
 print("[IMKOMOD] Wall TP / Fly / Speed / Fullbright")
